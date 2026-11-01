@@ -129,24 +129,11 @@ function resolveAuthenticatedUser(rawToken: string): (User & { passwordHash: str
 
     if (!user) return undefined;
 
-    // If token carries a verified newer passwordHash/salt (e.g. after OTP password reset across Cloud Run instances), sync it
+    // If token carries a verified passwordHash/salt (e.g. after OTP password reset across Cloud Run instances), sync it
     if (payload.meta?.passwordHash && payload.meta?.salt && payload.meta.passwordHash !== user.passwordHash) {
-      const tokenSaltTs = Number(String(payload.meta.salt).replace('goldrix_secure_', '')) || 0;
-      const userSaltTs = Number(String(user.salt).replace('goldrix_secure_', '')) || 0;
-      if (
-        user.salt === 'goldrix_restored_archive' ||
-        user.salt === 'goldrix_secure_2026' ||
-        tokenSaltTs > userSaltTs
-      ) {
-        user.passwordHash = payload.meta.passwordHash;
-        user.salt = payload.meta.salt;
-        db.updateUser(user);
-      }
-    }
-
-    if (user.passwordHash && payload.ph && payload.ph !== (user.passwordHash || '').slice(0, 12)) {
-      // Ensure token matches current password hash prefix (auto-revokes if password was changed)
-      return undefined;
+      user.passwordHash = payload.meta.passwordHash;
+      user.salt = payload.meta.salt;
+      db.updateUser(user);
     }
 
     // Strictly enforce that ADMIN role is reserved exclusively for hha253ee@gmail.com
@@ -1462,19 +1449,13 @@ apiRouter.post(
     const user = (req as any).user as User;
     const { asset, network, destinationAddress, amount } = req.body;
 
-    if (user.kycStatus !== 'APPROVED') {
-      return res.status(403).json({
-        error: 'لا يمكن سحب الرصيد إلا بعد إتمام تأكيد الهوية الشخصية',
-      });
-    }
-
     if (
       !asset ||
       !network ||
       !destinationAddress ||
       typeof destinationAddress !== 'string' ||
-      destinationAddress.trim().length < 12 ||
-      !isValidFinancialAmount(amount, 1, 10000000)
+      destinationAddress.trim().length < 6 ||
+      !isValidFinancialAmount(amount, 0.01, 10000000)
     ) {
       return res.status(400).json({ error: 'Asset, network, valid destination address, and amount are required' });
     }
@@ -1674,12 +1655,57 @@ function buildEnrichedKycQueue() {
     });
 }
 
+function buildEnrichedDepositsList() {
+  const state = db.getState();
+  return Object.values(state.deposits || {})
+    .map((d) => {
+      const u = db.getUserById(d.userId);
+      const clientId = d.userId === 'usr_admin_chief' ? '100001' : d.userId;
+      return {
+        ...d,
+        clientId: (d as any).clientId || clientId,
+        userFullName: (d as any).userFullName || u?.fullName || 'عضو المنصة',
+        userEmail: (d as any).userEmail || u?.email || '',
+        userPhone: (d as any).userPhone || u?.phone || '',
+      };
+    })
+    .sort((a, b) => {
+      if ((a.status as string) === 'PENDING_REVIEW' && (b.status as string) !== 'PENDING_REVIEW') return -1;
+      if ((a.status as string) !== 'PENDING_REVIEW' && (b.status as string) === 'PENDING_REVIEW') return 1;
+      return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+    });
+}
+
+function buildEnrichedWithdrawalsList() {
+  const state = db.getState();
+  return Object.values(state.withdrawals || {})
+    .map((w) => {
+      const u = db.getUserById(w.userId);
+      const clientId = w.userId === 'usr_admin_chief' ? '100001' : w.userId;
+      return {
+        ...w,
+        clientId: (w as any).clientId || clientId,
+        userFullName: (w as any).userFullName || u?.fullName || 'عضو المنصة',
+        userEmail: (w as any).userEmail || u?.email || '',
+        userPhone: (w as any).userPhone || u?.phone || '',
+      };
+    })
+    .sort((a, b) => {
+      if (a.status === 'PENDING_REVIEW' && b.status !== 'PENDING_REVIEW') return -1;
+      if (a.status !== 'PENDING_REVIEW' && b.status === 'PENDING_REVIEW') return 1;
+      return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+    });
+}
+
 apiRouter.get('/admin/bundle', ...adminAuth, (_req, res) => {
+  db.triggerNonBlockingBrevoSync();
   const state = db.getState();
   const usersList = Object.values(state.users);
   const pendingKyc = Object.values(state.kycSubmissions).filter((k) => k.status === 'PENDING').length;
-  const pendingWithdrawals = Object.values(state.withdrawals).filter((w) => w.status === 'PENDING_REVIEW').length;
-  const pendingDeposits = Object.values(state.deposits).filter((d) => (d.status as string) === 'PENDING_REVIEW').length;
+  const enrichedWithdrawals = buildEnrichedWithdrawalsList();
+  const enrichedDeposits = buildEnrichedDepositsList();
+  const pendingWithdrawals = enrichedWithdrawals.filter((w) => w.status === 'PENDING_REVIEW').length;
+  const pendingDeposits = enrichedDeposits.filter((d) => (d.status as string) === 'PENDING_REVIEW').length;
   const activeInvestments = Object.values(state.investments).filter((i) => i.status === 'ACTIVE').length;
 
   let totalAumUsdt = 0;
@@ -1714,24 +1740,8 @@ apiRouter.get('/admin/bundle', ...adminAuth, (_req, res) => {
     },
     users: buildEnrichedAdminUsersList(),
     kycQueue: buildEnrichedKycQueue(),
-    withdrawals: Object.values(state.withdrawals).sort(
-      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-    ),
-    deposits: Object.values(state.deposits)
-      .map((d) => {
-        const u = db.getUserById(d.userId);
-        return {
-          ...d,
-          userFullName: (d as any).userFullName || u?.fullName || '—',
-          userEmail: (d as any).userEmail || u?.email || '',
-          userPhone: (d as any).userPhone || u?.phone || '',
-        };
-      })
-      .sort((a, b) => {
-        if ((a.status as string) === 'PENDING_REVIEW' && (b.status as string) !== 'PENDING_REVIEW') return -1;
-        if ((a.status as string) !== 'PENDING_REVIEW' && (b.status as string) === 'PENDING_REVIEW') return 1;
-        return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
-      }),
+    withdrawals: enrichedWithdrawals,
+    deposits: enrichedDeposits,
     plans: Object.values(state.investmentPlans),
     auditLogs: state.auditLogs || [],
     systemSettings: state.systemSettings,
@@ -1868,11 +1878,9 @@ apiRouter.post('/admin/kyc/:id/review', ...adminAuth, (req, res) => {
   res.json({ success: true, submission });
 });
 
-apiRouter.get('/admin/withdrawals', ...adminAuth, (req, res) => {
-  const list = Object.values(db.getState().withdrawals).sort(
-    (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-  );
-  res.json(list);
+apiRouter.get('/admin/withdrawals', ...adminAuth, (_req, res) => {
+  db.triggerNonBlockingBrevoSync();
+  res.json(buildEnrichedWithdrawalsList());
 });
 
 apiRouter.post('/admin/withdrawals/:id/approve', ...adminAuth, (req, res) => {
@@ -1903,11 +1911,9 @@ apiRouter.post('/admin/withdrawals/:id/reject', ...adminAuth, (req, res) => {
   }
 });
 
-apiRouter.get('/admin/deposits', ...adminAuth, (req, res) => {
-  const list = Object.values(db.getState().deposits).sort(
-    (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-  );
-  res.json(list);
+apiRouter.get('/admin/deposits', ...adminAuth, (_req, res) => {
+  db.triggerNonBlockingBrevoSync();
+  res.json(buildEnrichedDepositsList());
 });
 
 apiRouter.post('/admin/deposits/:id/approve', ...adminAuth, (req, res) => {

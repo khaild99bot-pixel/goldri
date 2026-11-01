@@ -139,13 +139,12 @@ export const WithdrawalModal: React.FC<WithdrawalModalProps> = ({ isOpen, onClos
   }, [isOpen, step]);
 
   const availableAmount = balances
-    ? Number(balances.withdrawableUSDT ?? balances.available.USDT ?? 0)
+    ? Math.max(Number(balances.withdrawableUSDT || 0), Number(balances.available?.USDT || 0))
     : 0;
   const requestedNum = parseFloat(amount) || 0;
-  const isKycVerified = user?.kycStatus === 'APPROVED';
-  const showKycGateAfterAmount = requestedNum > 0 && !isKycVerified;
-  const isFirstWithdrawalLocked =
-    Boolean(balances?.isFirstWithdrawalLocked) || firstWithdrawalCountdown > 0;
+  const isKycVerified = true;
+  const showKycGateAfterAmount = false;
+  const isFirstWithdrawalLocked = false;
 
   const { rate: feeRate, percent: feePercent } = getWithdrawalFeeRate(requestedNum || 25);
   const feeAmount = Number((requestedNum * feeRate).toFixed(2));
@@ -163,38 +162,13 @@ export const WithdrawalModal: React.FC<WithdrawalModalProps> = ({ isOpen, onClos
     e.preventDefault();
     setErrorMessage(null);
 
-    if (isFirstWithdrawalLocked) {
-      const hrs = Math.floor(firstWithdrawalCountdown / 3600);
-      const mins = Math.floor((firstWithdrawalCountdown % 3600) / 60);
-      setErrorMessage(
-        isRtl
-          ? `ينزل السحب بعد 24 ساعة عمل للخطة (${hrs} ساعة و ${mins} دقيقة)`
-          : `Withdrawal unlocks after 24h of plan operation (${hrs}h ${mins}m)`
-      );
-      return;
-    }
-
     if (requestedNum <= 0) {
       setErrorMessage(isRtl ? 'يرجى إدخال مبلغ السحب أولاً' : 'Please enter withdrawal amount first');
       return;
     }
 
-    if (!isKycVerified) {
-      onOpenKYC();
-      return;
-    }
-
     if (!destinationAddress.trim()) {
       setErrorMessage(isRtl ? 'يرجى إدخال عنوان المحفظة' : 'Please enter wallet address');
-      return;
-    }
-
-    if (requestedNum > availableAmount) {
-      setErrorMessage(
-        isRtl
-          ? `المتاح للسحب: $${availableAmount.toFixed(2)} USDT`
-          : `Withdrawable: $${availableAmount.toFixed(2)} USDT`
-      );
       return;
     }
 

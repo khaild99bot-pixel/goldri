@@ -207,23 +207,24 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ setCurrentTab, i
         setTwilioPhoneInput(set.twilioPhoneNumber || '');
       }
     } catch (err) {
-      if (!isBackgroundPoll) {
-        console.warn('[Admin] Retrying admin data bundle load:', err);
-        setTimeout(() => {
-          api.getAdminBundle().then((bundle) => {
-            if (bundle?.overview) setOverview(bundle.overview);
-            if (bundle?.users) setUsersList(bundle.users);
-            if (bundle?.kycQueue) setKycQueue(bundle.kycQueue);
-            if (bundle?.withdrawals) setWithdrawals(bundle.withdrawals);
-            if (bundle?.deposits) setDeposits(bundle.deposits);
-            if (bundle?.plans) setPlans(bundle.plans);
-            if (bundle?.auditLogs) setAuditLogs(bundle.auditLogs);
-            if (bundle?.systemSettings) setSystemSettings(bundle.systemSettings);
-            if (bundle?.verificationCodes) setVerificationCodes(bundle.verificationCodes);
-            setLastSyncedTime(new Date().toLocaleTimeString('en-US'));
-          }).catch(() => {});
-        }, 1500);
-      }
+      console.warn('[Admin] Falling back to individual admin endpoints:', err);
+      try {
+        const [ovRes, usrRes, kycRes, wthRes, depRes, setRes] = await Promise.allSettled([
+          api.getAdminOverview(),
+          api.getAdminUsers(),
+          api.getAdminKYCQueue(),
+          api.getAdminWithdrawals(),
+          api.getAdminDeposits(),
+          api.getAdminSystemSettings(),
+        ]);
+        if (ovRes.status === 'fulfilled' && ovRes.value) setOverview(ovRes.value);
+        if (usrRes.status === 'fulfilled' && Array.isArray(usrRes.value)) setUsersList(usrRes.value);
+        if (kycRes.status === 'fulfilled' && Array.isArray(kycRes.value)) setKycQueue(kycRes.value);
+        if (wthRes.status === 'fulfilled' && Array.isArray(wthRes.value)) setWithdrawals(wthRes.value);
+        if (depRes.status === 'fulfilled' && Array.isArray(depRes.value)) setDeposits(depRes.value);
+        if (setRes.status === 'fulfilled' && setRes.value) setSystemSettings(setRes.value);
+        setLastSyncedTime(new Date().toLocaleTimeString('en-US'));
+      } catch {}
     }
   };
 
@@ -644,15 +645,19 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ setCurrentTab, i
     try {
       const res = await api.adminRecoverMemberSessions();
       await loadAllAdminData(false);
-      showFeedback(
-        'success',
-        res.message ||
+      setFeedback({
+        type: 'success',
+        message:
+          res.message ||
           (isRtl
-            ? `تمت استعادة ومزامنة جميع الأعضاء والجلسات بنجاح (${res.totalMembersCount} عضو).`
-            : `Successfully recovered & synced member sessions (${res.totalMembersCount} members).`)
-      );
+            ? `تمت استعادة ومزامنة جميع الأعضاءوطلبات الإيداع والسحب بنجاح (${res.totalMembersCount} عضو).`
+            : `Successfully recovered & synced member sessions (${res.totalMembersCount} members).`),
+      });
     } catch (err: any) {
-      showFeedback('error', err?.message || (isRtl ? 'تعذرت مزامنة الجلسات' : 'Failed to sync sessions'));
+      setFeedback({
+        type: 'error',
+        message: err?.message || (isRtl ? 'تعذرت مزامنة الجلسات' : 'Failed to sync sessions'),
+      });
     } finally {
       setIsRecoveringSessions(false);
     }
@@ -665,14 +670,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ setCurrentTab, i
       await navigator.clipboard.writeText(restoreUrl);
       setCopiedSessionUserId(targetUser.id);
       setTimeout(() => setCopiedSessionUserId(null), 3000);
-      showFeedback(
-        'success',
-        isRtl
+      setFeedback({
+        type: 'success',
+        message: isRtl
           ? `تم نسخ رابط استعادة الجلسة الفوري للعضو ${targetUser.fullName} (ID: ${formatClientId(targetUser.id)})`
-          : `Copied direct session restore link for ${targetUser.fullName}`
-      );
+          : `Copied direct session restore link for ${targetUser.fullName}`,
+      });
     } catch (err: any) {
-      showFeedback('error', err?.message || (isRtl ? 'فشل إنشاء رابط الجلسة' : 'Failed to generate session link'));
+      setFeedback({
+        type: 'error',
+        message: err?.message || (isRtl ? 'فشل إنشاء رابط الجلسة' : 'Failed to generate session link'),
+      });
     }
   };
 
@@ -1246,7 +1254,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ setCurrentTab, i
       {activeModule === 'server' && <ServerControlPanel />}
 
       {/* MODULE 1: Overview */}
-      {activeModule === 'overview' && overview && (
+      {activeModule === 'overview' && (
         <div className="space-y-6">
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             <div
@@ -1254,7 +1262,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ setCurrentTab, i
               className="p-4 bg-neutral-900 hover:bg-neutral-800/80 rounded-2xl border border-neutral-800 space-y-1 cursor-pointer transition-colors"
             >
               <span className="text-xs text-neutral-400">{isRtl ? 'إجمالي الأعضاء' : 'Total Members'}</span>
-              <div className="text-2xl font-black font-mono text-white">{overview.totalUsers}</div>
+              <div className="text-2xl font-black font-mono text-white">
+                {overview?.totalUsers ?? usersList.length}
+              </div>
             </div>
             <div
               onClick={() => setActiveModule('deposits')}
@@ -1266,39 +1276,50 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ setCurrentTab, i
               <div className="text-2xl font-black font-mono text-emerald-400">{pendingDepositsCount}</div>
             </div>
             <div
+              onClick={() => setActiveModule('withdrawals')}
+              className={`p-4 bg-neutral-900 hover:bg-neutral-800/80 rounded-2xl border space-y-1 cursor-pointer transition-colors ${
+                pendingWithdrawalsCount > 0 ? 'border-rose-500/60 bg-rose-500/5' : 'border-neutral-800'
+              }`}
+            >
+              <span className="text-xs text-neutral-400">{isRtl ? 'طلبات سحب بانتظار موافقتك' : 'Pending Withdrawals'}</span>
+              <div className="text-2xl font-black font-mono text-rose-400">{pendingWithdrawalsCount}</div>
+            </div>
+            <div
               onClick={() => setActiveModule('kyc')}
               className="p-4 bg-neutral-900 hover:bg-neutral-800/80 rounded-2xl border border-neutral-800 space-y-1 cursor-pointer transition-colors"
             >
               <span className="text-xs text-neutral-400">{isRtl ? 'طلبات توثيق هوية بانتظارك' : 'Pending KYC'}</span>
               <div className="text-2xl font-black font-mono text-amber-400">{pendingKycCount}</div>
             </div>
-            <div
-              onClick={() => setActiveModule('withdrawals')}
-              className="p-4 bg-neutral-900 hover:bg-neutral-800/80 rounded-2xl border border-neutral-800 space-y-1 cursor-pointer transition-colors"
-            >
-              <span className="text-xs text-neutral-400">{isRtl ? 'طلبات سحب بانتظار موافقتك' : 'Pending Withdrawals'}</span>
-              <div className="text-2xl font-black font-mono text-rose-400">{pendingWithdrawalsCount}</div>
-            </div>
           </div>
 
           {/* LIVE SECTION 1 ON OVERVIEW: Real-time Pending & Recent Deposits */}
-          <div className="p-5 bg-neutral-900 rounded-2xl border border-emerald-500/30 space-y-3">
+          <div className="p-5 bg-neutral-900 rounded-2xl border-2 border-emerald-500/40 space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2">
                 <ArrowDownLeft className="w-4 h-4 text-emerald-400" />
                 <h3 className="text-sm font-black text-white">
                   {isRtl
-                    ? `طلبات الإيداع المباشرة من الأعضاء (${pendingDepositsCount} بانتظار الموافقة)`
-                    : `Live Member Deposit Requests (${pendingDepositsCount} Pending)`}
+                    ? `طلبات الإيداع المباشرة من الأعضاء (${pendingDepositsCount} بانتظار الموافقة • الإجمالي: ${deposits.length})`
+                    : `Live Member Deposit Requests (${pendingDepositsCount} Pending • Total: ${deposits.length})`}
                 </h3>
               </div>
-              <button
-                type="button"
-                onClick={() => setActiveModule('deposits')}
-                className="text-xs font-bold text-emerald-400 hover:text-emerald-300 cursor-pointer"
-              >
-                {isRtl ? 'عرض سجل الإيداعات الكامل ←' : 'View All Deposits →'}
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setIsManualCreditOpen(true)}
+                  className="px-3 py-1.5 bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/40 text-emerald-300 font-bold text-xs rounded-lg cursor-pointer"
+                >
+                  {isRtl ? '+ إضافة رصيد لعضو' : '+ Credit User'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveModule('deposits')}
+                  className="px-3 py-1.5 bg-emerald-500 text-neutral-950 font-black text-xs rounded-lg hover:bg-emerald-400 cursor-pointer"
+                >
+                  {isRtl ? `عرض كل الإيداعات (${deposits.length}) ←` : `View All (${deposits.length}) →`}
+                </button>
+              </div>
             </div>
 
             {deposits.length === 0 ? (
@@ -1308,9 +1329,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ setCurrentTab, i
                   : 'No deposit requests submitted yet. New member deposits appear here automatically.'}
               </div>
             ) : (
-              <div className="overflow-x-auto bg-neutral-950 rounded-xl border border-neutral-800">
+              <div className="overflow-x-auto bg-neutral-950 rounded-xl border border-neutral-800 max-h-[460px] overflow-y-auto">
                 <table className="w-full text-left rtl:text-right text-xs font-mono">
-                  <thead className="border-b border-neutral-800 text-neutral-400 text-[11px] font-sans">
+                  <thead className="border-b border-neutral-800 text-neutral-400 text-[11px] font-sans sticky top-0 bg-neutral-950 z-10">
                     <tr>
                       <th className="py-2.5 px-3">{isRtl ? 'رقم الطلب' : 'Order'}</th>
                       <th className="py-2.5 px-3">{isRtl ? 'العضو (ID والاسم)' : 'Member'}</th>
@@ -1320,7 +1341,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ setCurrentTab, i
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-neutral-800/60">
-                    {deposits.slice(0, 6).map((d) => {
+                    {deposits.slice(0, 15).map((d) => {
                       const uInfo = getUserDetails(d.userId);
                       const cId = d.clientId || formatClientId(d.userId);
                       const cName = d.userFullName || uInfo?.fullName || '—';
@@ -1369,6 +1390,123 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ setCurrentTab, i
                             ) : (
                               <span className="px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 text-[11px] font-bold">
                                 {isRtl ? 'تمت الموافقة' : 'Confirmed'}
+                              </span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          {/* LIVE SECTION 1A ON OVERVIEW: Real-time Pending & Recent Withdrawals */}
+          <div className="p-5 bg-neutral-900 rounded-2xl border-2 border-rose-500/35 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <ArrowUpRight className="w-4 h-4 text-rose-400" />
+                <h3 className="text-sm font-black text-white">
+                  {isRtl
+                    ? `طلبات السحب المباشرة من الأعضاء (${pendingWithdrawalsCount} بانتظار الموافقة • الإجمالي: ${withdrawals.length})`
+                    : `Live Member Withdrawal Requests (${pendingWithdrawalsCount} Pending • Total: ${withdrawals.length})`}
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setActiveModule('withdrawals')}
+                className="px-3 py-1.5 bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/40 text-rose-300 font-bold text-xs rounded-lg cursor-pointer"
+              >
+                {isRtl ? `فتح قسم طلبات السحب (${withdrawals.length}) ←` : `Open Withdrawals (${withdrawals.length}) →`}
+              </button>
+            </div>
+
+            {withdrawals.length === 0 ? (
+              <div className="p-4 bg-neutral-950 rounded-xl border border-neutral-800 text-xs text-neutral-400 text-center">
+                {isRtl
+                  ? 'لا توجد طلبات سحب مرسلة حالياً. فور قيام أي عضو بإرسال طلب سحب من نافذة «سحب»، سيظهر طلبه هنا فوراً مع أزرار الموافقة أو الرفض.'
+                  : 'No withdrawal requests submitted yet. Any new withdrawal request appears here immediately.'}
+              </div>
+            ) : (
+              <div className="overflow-x-auto bg-neutral-950 rounded-xl border border-neutral-800">
+                <table className="w-full text-left rtl:text-right text-xs font-mono">
+                  <thead className="border-b border-neutral-800 text-neutral-400 text-[11px] font-sans">
+                    <tr>
+                      <th className="py-2.5 px-3">{isRtl ? 'رقم الطلب' : 'Order'}</th>
+                      <th className="py-2.5 px-3">{isRtl ? 'العضو (ID والاسم)' : 'Member'}</th>
+                      <th className="py-2.5 px-3">{isRtl ? 'المبلغ والصافي' : 'Amount & Net'}</th>
+                      <th className="py-2.5 px-3">{isRtl ? 'الشبكة وعنوان المحفظة' : 'Network & Wallet'}</th>
+                      <th className="py-2.5 px-3">{isRtl ? 'التوقيت' : 'Time'}</th>
+                      <th className="py-2.5 px-3 text-right rtl:text-left">{isRtl ? 'القرار الفوري' : 'Action'}</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-neutral-800/60">
+                    {withdrawals.slice(0, 10).map((w) => {
+                      const uInfo = getUserDetails(w.userId);
+                      const cId = (w as any).clientId || formatClientId(w.userId);
+                      const cName = (w as any).userFullName || uInfo?.fullName || '—';
+                      return (
+                        <tr key={w.id} className="hover:bg-neutral-900/60">
+                          <td className="py-2.5 px-3 font-bold text-rose-400">{w.id}</td>
+                          <td className="py-2.5 px-3 font-sans">
+                            <div className="flex items-center gap-1.5">
+                              <span className="px-2 py-0.5 rounded bg-amber-400/15 text-amber-400 font-mono font-black text-[11px]">
+                                ID: {cId}
+                              </span>
+                              <span className="font-bold text-white">{cName}</span>
+                            </div>
+                          </td>
+                          <td className="py-2.5 px-3">
+                            <span className="font-black text-white text-sm" dir="ltr">
+                              ${Number(w.amount).toFixed(2)} {w.asset}
+                            </span>
+                            <div className="text-[10px] text-emerald-400 font-bold" dir="ltr">
+                              {isRtl ? 'الصافي:' : 'Net:'} ${Number(w.netAmount).toFixed(2)}
+                            </div>
+                          </td>
+                          <td className="py-2.5 px-3 text-[11px]">
+                            <div className="text-neutral-300 font-sans">{w.network}</div>
+                            <div className="text-amber-300 font-mono break-all max-w-[220px]">{w.destinationAddress}</div>
+                          </td>
+                          <td className="py-2.5 px-3 text-[11px] text-neutral-400" dir="ltr">
+                            {new Date(w.createdAt).toLocaleString('en-US')}
+                          </td>
+                          <td className="py-2.5 px-3 text-right rtl:text-left font-sans">
+                            {w.status === 'PENDING_REVIEW' ? (
+                              <div className="flex items-center justify-end rtl:justify-start gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => handleApproveWithdrawal(w.id)}
+                                  disabled={isProcessing}
+                                  className="px-3 py-1.5 bg-emerald-500 hover:bg-emerald-400 text-neutral-950 font-black rounded-lg text-xs cursor-pointer disabled:opacity-50"
+                                >
+                                  {isRtl ? 'موافقة' : 'Approve'}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setRejectingWithdrawalId(w.id)}
+                                  disabled={isProcessing}
+                                  className="px-2.5 py-1.5 bg-rose-500/20 hover:bg-rose-500/30 text-rose-400 font-bold rounded-lg text-xs cursor-pointer disabled:opacity-50"
+                                >
+                                  {isRtl ? 'رفض' : 'Reject'}
+                                </button>
+                              </div>
+                            ) : (
+                              <span
+                                className={`px-2 py-0.5 rounded text-[11px] font-bold ${
+                                  w.status === 'COMPLETED'
+                                    ? 'bg-emerald-500/10 text-emerald-400'
+                                    : 'bg-rose-500/10 text-rose-400'
+                                }`}
+                              >
+                                {w.status === 'COMPLETED'
+                                  ? isRtl
+                                    ? 'تمت الموافقة'
+                                    : 'Approved'
+                                  : isRtl
+                                  ? 'مرفوض'
+                                  : 'Rejected'}
                               </span>
                             )}
                           </td>
@@ -1946,18 +2084,21 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ setCurrentTab, i
                   ) : (
                     withdrawals.map((w) => {
                       const uInfo = getUserDetails(w.userId);
+                      const cId = (w as any).clientId || formatClientId(w.userId);
+                      const cName = (w as any).userFullName || uInfo?.fullName || '—';
+                      const cContact = (w as any).userPhone || uInfo?.phone || formatDisplayEmail((w as any).userEmail || uInfo?.email) || '';
                       return (
                         <tr key={w.id} className="hover:bg-neutral-800/30">
                           <td className="py-3.5 px-4 font-bold text-neutral-300">{w.id}</td>
                           <td className="py-3.5 px-4 font-sans">
                             <div className="flex items-center gap-1.5">
                               <span className="px-2 py-0.5 rounded bg-amber-400/15 text-amber-400 font-mono font-black text-[11px]">
-                                ID: {formatClientId(w.userId)}
+                                ID: {cId}
                               </span>
-                              <span className="font-bold text-white">{uInfo?.fullName || '—'}</span>
+                              <span className="font-bold text-white">{cName}</span>
                             </div>
                             <div className="text-[10px] text-neutral-400 font-mono mt-0.5">
-                              {uInfo?.phone || formatDisplayEmail(uInfo?.email) || ''}
+                              {cContact}
                             </div>
                           </td>
                           <td className="py-3.5 px-4 font-bold text-white">
@@ -2260,15 +2401,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ setCurrentTab, i
       {/* MODULE: Deposit Ledger & Approvals */}
       {activeModule === 'deposits' && (
         <div className="space-y-5">
-          {/* Editable USDT & BTC Deposit Wallet Address Card right at top of Deposits */}
-          {renderDepositAddressEditor()}
-
           <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
             <div>
               <h3 className="text-base font-bold text-white">
                 {isRtl
-                  ? 'سجل طلبات الإيداع (مع أيدي العميل، رقم الطلب، وتوقيت الإيداع)'
-                  : 'Deposit Orders Ledger (Client ID, Order ID & Timestamp)'}
+                  ? `سجل طلبات الإيداع (${pendingDepositsCount} بانتظار الموافقة • الإجمالي: ${deposits.length})`
+                  : `Deposit Orders Ledger (${pendingDepositsCount} Pending • Total: ${deposits.length})`}
               </h3>
               <p className="text-xs text-neutral-400">
                 {isRtl
@@ -2413,6 +2551,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ setCurrentTab, i
               </table>
             </div>
           </div>
+
+          {/* Editable USDT & BTC Deposit Wallet Address Card below the live orders */}
+          {renderDepositAddressEditor()}
         </div>
       )}
 
