@@ -32,7 +32,10 @@ async function startServer() {
   await db.initPostgres();
 
   const app = express();
-  const PORT = Number(process.env.PORT) || 3000;
+  const PORT =
+    process.env.NGINX_PORT && process.env.PORT === process.env.NGINX_PORT
+      ? Number(process.env.DEFAULT_APP_PORT) || 3000
+      : Number(process.env.PORT) || 3000;
   const isProd = process.env.NODE_ENV === 'production';
 
   // Disable server stack fingerprinting
@@ -74,11 +77,59 @@ async function startServer() {
     }
   );
 
-  // REST API Endpoints
-  app.use('/api/v1', apiRouter);
+  // Self-unregistering Service Worker endpoint to immediately purge stale browser Workbox caches
+  app.get(['/sw.js', '/dev-sw.js', '/registerSW.js', '/workbox-*.js'], (_req, res) => {
+    res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
+    res.setHeader('Clear-Site-Data', '"cache"');
+    res.send(`
+      self.addEventListener('install', function() {
+        self.skipWaiting();
+      });
+      self.addEventListener('activate', function(event) {
+        event.waitUntil(
+          caches.keys().then(function(keys) {
+            return Promise.all(keys.map(function(k) { return caches.delete(k); }));
+          }).then(function() {
+            return self.registration.unregister();
+          }).then(function() {
+            return self.clients.matchAll();
+          }).then(function(clients) {
+            clients.forEach(function(client) {
+              if (client.url && 'navigate' in client) {
+                client.navigate(client.url);
+              }
+            });
+          })
+        );
+      });
+    `);
+  });
 
-  // Quick top-level health check (used by Render zero-downtime health checks)
-  app.get('/api/health', (req, res) => {
+  app.get('/manifest.webmanifest', (_req, res) => {
+    res.setHeader('Content-Type', 'application/manifest+json; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({
+      id: '/',
+      name: 'GOLDRIX Smart Trading & Investment',
+      short_name: 'GOLDRIX',
+      description: 'Digital asset smart trading and investment plans with daily profit withdrawal.',
+      theme_color: '#06090F',
+      background_color: '#06090F',
+      display: 'standalone',
+      orientation: 'portrait',
+      start_url: '/',
+      scope: '/',
+      icons: [
+        { src: '/pwa-192x192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
+        { src: '/pwa-512x512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
+        { src: '/pwa-maskable-512x512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
+      ],
+    });
+  });
+
+  // Quick top-level health check (used by Render & Cloud Run zero-downtime health checks)
+  app.get(['/api/health', '/api/v1/health-ping'], (_req, res) => {
     res.json({
       status: 'UP',
       platform: 'GOLDRIX',
@@ -86,6 +137,9 @@ async function startServer() {
       timestamp: new Date().toISOString(),
     });
   });
+
+  // REST API Endpoints (mounted on both /api/v1 and /api for full compatibility)
+  app.use(['/api/v1', '/api'], apiRouter);
 
   // Official High-Resolution Platform Icon File Download (GOLDRIX-Icon.png)
   const iconPngPath = path.resolve(__dirname, 'public', 'pwa-512x512.png');
@@ -99,7 +153,7 @@ async function startServer() {
   // Official Standalone App Icon Launcher File (GOLDRIX-App.html) - Works on Android, iPhone, Windows & Mac
   app.get(['/GOLDRIX-App.html', '/api/download/launcher', '/api/v1/download/launcher'], (req, res) => {
     const protocol = req.headers['x-forwarded-proto'] || req.protocol || 'https';
-    const host = req.headers['x-forwarded-host'] || req.get('host') || 'goldrix-o3gl.onrender.com';
+    const host = req.headers['x-forwarded-host'] || req.get('host') || 'ais-dev-hloghgofbdwzb52dnlzjyh-242909076674.europe-west2.run.app';
     const targetUrl = `${protocol}://${host}/`;
 
     const launcherHtml = `<!DOCTYPE html>
@@ -191,7 +245,7 @@ async function startServer() {
   // Official Shortcut File Download (GOLDRIX.url)
   app.get(['/GOLDRIX.url', '/api/download/shortcut', '/api/v1/download/shortcut'], (req, res) => {
     const protocol = req.headers['x-forwarded-proto'] || req.protocol || 'https';
-    const host = req.headers['x-forwarded-host'] || req.get('host') || 'goldrix-o3gl.onrender.com';
+    const host = req.headers['x-forwarded-host'] || req.get('host') || 'ais-dev-hloghgofbdwzb52dnlzjyh-242909076674.europe-west2.run.app';
     const targetUrl = `${protocol}://${host}/`;
     const shortcutContent = `[InternetShortcut]\r\nURL=${targetUrl}\r\nIconFile=${targetUrl}pwa-512x512.png\r\nIconIndex=0\r\n`;
     res.setHeader('Content-Type', 'application/internet-shortcut');
@@ -207,13 +261,14 @@ async function startServer() {
     });
   });
 
-  // Redirect /admin and /members directly to root query parameters so Cloud proxy root path always resolves cleanly
-  app.get(['/admin', '/admin/*'], (_req, res) => {
-    res.redirect('/?admin=1');
+  // Secret Admin Vault URL redirect
+  app.get(['/vault-grd9942', '/vault-grd9942/*'], (_req, res) => {
+    res.redirect('/?vault_key=grd9942');
   });
 
-  app.get(['/member', '/members', '/member/*', '/members/*'], (_req, res) => {
-    res.redirect('/?member=1');
+  // Keep old /admin paths hidden by redirecting to normal member root
+  app.get(['/admin', '/admin/*', '/member', '/members', '/member/*', '/members/*'], (_req, res) => {
+    res.redirect('/');
   });
 
   if (!isProd) {

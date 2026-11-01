@@ -145,7 +145,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ setCurrentTab, i
   const [lastSyncedTime, setLastSyncedTime] = useState<string>(() => new Date().toLocaleTimeString('en-US'));
   const walletsInitializedRef = React.useRef<boolean>(false);
 
-  const adminPrivateUrl = `${window.location.origin}/?admin=1`;
+  const adminPrivateUrl = `${window.location.origin}/?vault_key=grd9942`;
   const memberPublicUrl = `${window.location.origin}/?ref=100001&register=1`;
 
   const loadAllAdminData = async (isBackgroundPoll = false) => {
@@ -554,10 +554,24 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ setCurrentTab, i
     }
   };
 
+  const normalizeOtpInputDigits = (val: string) =>
+    String(val || '')
+      .replace(/[٠-٩]/g, (d) => String(d.charCodeAt(0) - 0x0660))
+      .replace(/[۰-۹]/g, (d) => String(d.charCodeAt(0) - 0x06f0))
+      .replace(/\D/g, '')
+      .slice(0, 6);
+
   const handleSendAdminResetOtp = async () => {
     setAdminLoginError(null);
     setAdminResetMsg(null);
-    const cleanEmail = adminEmailInput.trim().toLowerCase();
+    let cleanEmail = adminEmailInput.trim().toLowerCase();
+    if (!cleanEmail) {
+      cleanEmail = 'hha253ee@gmail.com';
+      setAdminEmailInput(cleanEmail);
+    } else if (!cleanEmail.includes('@')) {
+      cleanEmail = `${cleanEmail}@gmail.com`;
+      setAdminEmailInput(cleanEmail);
+    }
     if (cleanEmail !== 'hha253ee@gmail.com') {
       setAdminLoginError(
         isRtl
@@ -587,7 +601,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ setCurrentTab, i
     e.preventDefault();
     setAdminLoginError(null);
     setAdminResetMsg(null);
-    if (resetOtpCode.trim().length !== 6) {
+    const cleanOtp = normalizeOtpInputDigits(resetOtpCode);
+    if (cleanOtp.length !== 6) {
       setAdminLoginError(isRtl ? 'يرجى إدخال رمز التحقق المكون من 6 أرقام' : 'Enter the 6-digit OTP code');
       return;
     }
@@ -603,7 +618,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ setCurrentTab, i
     try {
       const res = await api.resetPasswordWithOtp({
         email: 'hha253ee@gmail.com',
-        code: resetOtpCode.trim(),
+        code: cleanOtp,
         newPassword: resetNewPassword,
       });
       if (res.token) {
@@ -618,6 +633,46 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ setCurrentTab, i
       setAdminLoginError(err?.message || (isRtl ? 'فشل التحقق من الرمز أو تحديث كلمة المرور' : 'Reset failed'));
     } finally {
       setIsResettingAdminPass(false);
+    }
+  };
+
+  const [isRecoveringSessions, setIsRecoveringSessions] = useState(false);
+  const [copiedSessionUserId, setCopiedSessionUserId] = useState<string | null>(null);
+
+  const handleRecoverMemberSessions = async () => {
+    setIsRecoveringSessions(true);
+    try {
+      const res = await api.adminRecoverMemberSessions();
+      await loadAllAdminData(false);
+      showFeedback(
+        'success',
+        res.message ||
+          (isRtl
+            ? `تمت استعادة ومزامنة جميع الأعضاء والجلسات بنجاح (${res.totalMembersCount} عضو).`
+            : `Successfully recovered & synced member sessions (${res.totalMembersCount} members).`)
+      );
+    } catch (err: any) {
+      showFeedback('error', err?.message || (isRtl ? 'تعذرت مزامنة الجلسات' : 'Failed to sync sessions'));
+    } finally {
+      setIsRecoveringSessions(false);
+    }
+  };
+
+  const handleCopyMemberSessionLink = async (targetUser: any) => {
+    try {
+      const res = await api.adminGenerateMemberSessionLink(targetUser.id);
+      const restoreUrl = `${window.location.origin}/?restore_session=${encodeURIComponent(res.token)}`;
+      await navigator.clipboard.writeText(restoreUrl);
+      setCopiedSessionUserId(targetUser.id);
+      setTimeout(() => setCopiedSessionUserId(null), 3000);
+      showFeedback(
+        'success',
+        isRtl
+          ? `تم نسخ رابط استعادة الجلسة الفوري للعضو ${targetUser.fullName} (ID: ${formatClientId(targetUser.id)})`
+          : `Copied direct session restore link for ${targetUser.fullName}`
+      );
+    } catch (err: any) {
+      showFeedback('error', err?.message || (isRtl ? 'فشل إنشاء رابط الجلسة' : 'Failed to generate session link'));
     }
   };
 
@@ -786,11 +841,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ setCurrentTab, i
                 </label>
                 <input
                   type="text"
+                  inputMode="numeric"
                   dir="ltr"
                   maxLength={6}
                   required
                   value={resetOtpCode}
-                  onChange={(e) => setResetOtpCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                  onChange={(e) => setResetOtpCode(normalizeOtpInputDigits(e.target.value))}
                   placeholder="000000"
                   className="w-full px-4 py-3 rounded-xl bg-neutral-950 border border-neutral-800 text-amber-400 font-mono text-center text-base tracking-[0.35em] font-black focus:outline-none focus:border-amber-400"
                 />
@@ -1490,13 +1546,32 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ setCurrentTab, i
                     : `Registered & Active Members (${usersList.length})`}
                 </h3>
               </div>
-              <button
-                type="button"
-                onClick={() => setActiveModule('users')}
-                className="text-xs font-bold text-amber-400 hover:text-amber-300 cursor-pointer"
-              >
-                {isRtl ? 'إدارة كافة الأعضاء والأرصدة ←' : 'Manage All Users →'}
-              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleRecoverMemberSessions}
+                  disabled={isRecoveringSessions}
+                  className="px-3 py-1.5 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-400 font-bold text-xs flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${isRecoveringSessions ? 'animate-spin' : ''}`} />
+                  <span>
+                    {isRecoveringSessions
+                      ? isRtl
+                        ? 'جاري استعادة الجلسات...'
+                        : 'Restoring...'
+                      : isRtl
+                      ? 'استعادة ومزامنة جلسات الأعضاء'
+                      : 'Restore Member Sessions'}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveModule('users')}
+                  className="text-xs font-bold text-amber-400 hover:text-amber-300 cursor-pointer"
+                >
+                  {isRtl ? 'إدارة كافة الأعضاء والأرصدة ←' : 'Manage All Users →'}
+                </button>
+              </div>
             </div>
 
             <div className="overflow-x-auto bg-neutral-950 rounded-xl border border-neutral-800">
@@ -1977,19 +2052,38 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ setCurrentTab, i
                 className="w-full pl-9 pr-3 py-2.5 bg-neutral-900 border border-neutral-800 rounded-xl text-xs text-white focus:outline-none focus:border-amber-400"
               />
             </div>
-            <button
-              type="button"
-              onClick={() => {
-                setBalanceAdjustMode('CREDIT');
-                setConfirmBalanceStep(false);
-                setCreditAmount('');
-                setIsManualCreditOpen(true);
-              }}
-              className="px-4 py-2.5 bg-emerald-500 hover:bg-emerald-400 text-neutral-950 font-black text-xs rounded-xl flex items-center gap-1.5 cursor-pointer"
-            >
-              <Plus className="w-4 h-4" />
-              <span>{isRtl ? 'تعديل رصيد عضو (إضافة / خصم / تصفير)' : 'Adjust Member Balance'}</span>
-            </button>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={handleRecoverMemberSessions}
+                disabled={isRecoveringSessions}
+                className="px-4 py-2.5 bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 text-amber-400 font-black text-xs rounded-xl flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+              >
+                <RefreshCw className={`w-4 h-4 ${isRecoveringSessions ? 'animate-spin' : ''}`} />
+                <span>
+                  {isRecoveringSessions
+                    ? isRtl
+                      ? 'جاري استعادة الجلسات...'
+                      : 'Restoring...'
+                    : isRtl
+                    ? `استعادة ومزامنة جلسات الأعضاء (${usersList.length})`
+                    : `Restore Member Sessions (${usersList.length})`}
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setBalanceAdjustMode('CREDIT');
+                  setConfirmBalanceStep(false);
+                  setCreditAmount('');
+                  setIsManualCreditOpen(true);
+                }}
+                className="px-4 py-2.5 bg-emerald-500 hover:bg-emerald-400 text-neutral-950 font-black text-xs rounded-xl flex items-center gap-1.5 cursor-pointer"
+              >
+                <Plus className="w-4 h-4" />
+                <span>{isRtl ? 'تعديل رصيد عضو (إضافة / خصم / تصفير)' : 'Adjust Member Balance'}</span>
+              </button>
+            </div>
           </div>
 
           <div className="bg-neutral-900 rounded-2xl border border-neutral-800 overflow-hidden">
@@ -2056,6 +2150,21 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ setCurrentTab, i
                         </td>
                         <td className="py-3.5 px-4 text-right rtl:text-left">
                           <div className="flex flex-wrap items-center justify-end rtl:justify-start gap-1.5">
+                            {u.role !== 'ADMIN' && (
+                              <button
+                                type="button"
+                                onClick={() => handleCopyMemberSessionLink(u)}
+                                className="px-2.5 py-1.5 rounded-lg bg-amber-400/15 border border-amber-400/30 text-amber-300 hover:bg-amber-400/25 font-bold text-xs cursor-pointer"
+                              >
+                                {copiedSessionUserId === u.id
+                                  ? isRtl
+                                    ? 'تم نسخ رابط الجلسة'
+                                  : 'Link Copied'
+                                  : isRtl
+                                  ? 'رابط استعادة الجلسة'
+                                  : 'Restore Session Link'}
+                              </button>
+                            )}
                             <button
                               type="button"
                               onClick={() => {

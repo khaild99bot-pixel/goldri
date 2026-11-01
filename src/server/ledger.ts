@@ -9,7 +9,7 @@
  * 5. Strictly prevents negative available or reserved balances
  */
 
-import { AssetSymbol, LedgerAccount, LedgerEntry, LedgerTransaction, TransactionType } from '../types/index.ts';
+import type { AssetSymbol, LedgerAccount, LedgerEntry, LedgerTransaction, TransactionType } from '../types/index.ts';
 
 const SCALE = 8;
 const FACTOR = BigInt(10 ** SCALE);

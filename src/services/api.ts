@@ -8,6 +8,24 @@ class ApiService {
   private token: string | null = null;
 
   constructor() {
+    if (typeof window !== 'undefined') {
+      try {
+        const params = new URLSearchParams(window.location.search);
+        const restoreToken = params.get('restore_session');
+        if (restoreToken && restoreToken.startsWith('grd.')) {
+          localStorage.setItem('goldrix_member_token', restoreToken);
+          params.delete('restore_session');
+          const cleanQuery = params.toString();
+          const nextUrl =
+            window.location.pathname +
+            (cleanQuery ? `?${cleanQuery}` : '') +
+            window.location.hash;
+          window.history.replaceState({}, '', nextUrl);
+        }
+      } catch {
+        // ignore URL parsing error
+      }
+    }
     const saved = localStorage.getItem('goldrix_member_token');
     if (saved && saved.startsWith('grd.')) {
       this.token = saved;
@@ -32,10 +50,11 @@ class ApiService {
     return this.token;
   }
 
-  private async request<T>(endpoint: string, options: RequestInit = {}, retryCount = 3): Promise<T> {
+  private async request<T>(endpoint: string, options: RequestInit = {}, retryCount = 4): Promise<T> {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
       Accept: 'application/json',
+      'Cache-Control': 'no-cache, no-store',
       ...(options.headers as Record<string, string>),
     };
 
@@ -43,11 +62,21 @@ class ApiService {
       headers['Authorization'] = `Bearer ${this.token}`;
     }
 
-    const response = await fetch(`${API_BASE}${endpoint}`, {
-      ...options,
-      credentials: 'same-origin',
-      headers,
-    });
+    let response: Response;
+    try {
+      response = await fetch(`${API_BASE}${endpoint}`, {
+        ...options,
+        cache: 'no-store',
+        credentials: 'same-origin',
+        headers,
+      });
+    } catch (netErr: any) {
+      if (retryCount > 0) {
+        await new Promise((resolve) => setTimeout(resolve, 900));
+        return this.request<T>(endpoint, options, retryCount - 1);
+      }
+      throw new Error('تعذر الاتصال بالخادم حالياً، يرجى المحاولة مرة أخرى بعد لحظات.');
+    }
 
     const rawText = await response.text();
     const trimmed = rawText.trim();
@@ -61,16 +90,27 @@ class ApiService {
           throw new Error(`Invalid JSON response from server (HTTP ${response.status})`);
         }
       } else {
-        // Server or proxy returned HTML (e.g. <!doctype html> during container warm-up/restart)
-        if (retryCount > 0 && (!options.method || options.method === 'GET')) {
-          await new Promise((resolve) => setTimeout(resolve, 1000));
+        // Server or proxy returned HTML/text (e.g. during container warm-up/restart) — request never reached Express JSON handler
+        if (retryCount > 0) {
+          await new Promise((resolve) => setTimeout(resolve, 900));
           return this.request<T>(endpoint, options, retryCount - 1);
         }
-        throw new Error(`Server is warming up (HTTP ${response.status}). Please try again in a moment.`);
+        if (typeof window !== 'undefined' && window.location.hostname.includes('onrender.com')) {
+          throw new Error(
+            'أنت تتصفح نسخة قديمة مخزنة. يرجى فتح الرابط السحابي الجديد للمنصة لتسجيل الدخول.'
+          );
+        }
+        throw new Error(
+          'جاري تنشيط اتصال السيرفر، يرجى الضغط على تسجيل الدخول مرة أخرى الآن.'
+        );
       }
     }
 
     if (!response.ok) {
+      if ((response.status === 502 || response.status === 503 || response.status === 504) && retryCount > 0) {
+        await new Promise((resolve) => setTimeout(resolve, 900));
+        return this.request<T>(endpoint, options, retryCount - 1);
+      }
       throw new Error(data?.error || `Request failed with status ${response.status}`);
     }
 
@@ -164,34 +204,72 @@ class ApiService {
     });
   }
 
-  public sendPasswordResetCode(email: string, isResend = false) {
-    return this.request<{
-      success: boolean;
-      email: string;
-      deliveredVia: string;
-      expiresInSeconds: number;
-      cooldownSeconds: number;
-      sendCount: number;
-      maxSends: number;
-      remainingSends: number;
-      maxVerifyAttempts: number;
-      message: string;
-    }>('/auth/forgot-password/send-code', {
-      method: 'POST',
-      body: JSON.stringify({ email, isResend }),
-    });
+  public async sendPasswordResetCode(email: string, isResend = false) {
+    try {
+      return await this.request<{
+        success: boolean;
+        email: string;
+        deliveredVia: string;
+        expiresInSeconds: number;
+        cooldownSeconds: number;
+        sendCount: number;
+        maxSends: number;
+        remainingSends: number;
+        maxVerifyAttempts: number;
+        message: string;
+      }>('/auth/forgot-password/send-code', {
+        method: 'POST',
+        body: JSON.stringify({ email, isResend }),
+      });
+    } catch (err: any) {
+      const msg = String(err?.message || '');
+      if (msg.includes('404') || msg.includes('not found') || msg.includes('تنشيط')) {
+        return await this.request<{
+          success: boolean;
+          email: string;
+          deliveredVia: string;
+          expiresInSeconds: number;
+          cooldownSeconds: number;
+          sendCount: number;
+          maxSends: number;
+          remainingSends: number;
+          maxVerifyAttempts: number;
+          message: string;
+        }>('/email/send-code', {
+          method: 'POST',
+          body: JSON.stringify({ email, isResend, forPasswordReset: true }),
+        });
+      }
+      throw err;
+    }
   }
 
-  public resetPasswordWithOtp(data: { email: string; code: string; newPassword: string }) {
-    return this.request<{
-      success: boolean;
-      token: string;
-      user: any;
-      message: string;
-    }>('/auth/forgot-password/reset', {
-      method: 'POST',
-      body: JSON.stringify(data),
-    });
+  public async resetPasswordWithOtp(data: { email: string; code: string; newPassword: string }) {
+    try {
+      return await this.request<{
+        success: boolean;
+        token: string;
+        user: any;
+        message: string;
+      }>('/auth/forgot-password/reset', {
+        method: 'POST',
+        body: JSON.stringify(data),
+      });
+    } catch (err: any) {
+      const msg = String(err?.message || '');
+      if (msg.includes('404') || msg.includes('not found') || msg.includes('تنشيط')) {
+        return await this.request<{
+          success: boolean;
+          token: string;
+          user: any;
+          message: string;
+        }>('/email/verify-code', {
+          method: 'POST',
+          body: JSON.stringify({ ...data, forPasswordReset: true }),
+        });
+      }
+      throw err;
+    }
   }
 
   public verifyEmailCode(data: { email: string; code: string }) {
@@ -495,6 +573,30 @@ class ApiService {
     return this.request<any>('/admin/system-settings', {
       method: 'PUT',
       body: JSON.stringify(settings),
+    });
+  }
+
+  public adminRecoverMemberSessions() {
+    return this.request<{
+      success: boolean;
+      recoveredUsersCount: number;
+      recoveredDepositsCount: number;
+      totalMembersCount: number;
+      message: string;
+    }>('/admin/users/recover-sessions', {
+      method: 'POST',
+    });
+  }
+
+  public adminGenerateMemberSessionLink(userId: string) {
+    return this.request<{
+      success: boolean;
+      token: string;
+      userId: string;
+      fullName: string;
+      email: string;
+    }>(`/admin/users/${encodeURIComponent(userId)}/session-link`, {
+      method: 'POST',
     });
   }
 

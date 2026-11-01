@@ -44,12 +44,13 @@ function isAdminUrlRequested(): boolean {
   if (searchParams.has('member') || searchParams.has('members') || searchParams.has('ref') || searchParams.has('register')) {
     return false;
   }
+  const vaultKey = (searchParams.get('vault_key') || '').trim();
+  const path = window.location.pathname.toLowerCase();
+  const hash = window.location.hash.toLowerCase();
   return (
-    searchParams.has('admin') ||
-    window.location.pathname === '/admin' ||
-    window.location.pathname.startsWith('/admin/') ||
-    window.location.hash === '#admin' ||
-    window.location.hash === '#/admin'
+    vaultKey === 'grd9942' ||
+    path === '/vault-grd9942' ||
+    hash === '#vault-grd9942'
   );
 }
 
@@ -116,6 +117,24 @@ function MainApp() {
   useEffect(() => {
     if (user) {
       setAuthOpen(false);
+      // If the authenticated user is the Chief Admin (hha253ee@gmail.com), automatically enter the Secret Admin Console
+      // unless they explicitly switched to Member preview (?member=1)
+      const params = new URLSearchParams(window.location.search);
+      if (
+        user.role === 'ADMIN' &&
+        user.email?.toLowerCase() === 'hha253ee@gmail.com' &&
+        !params.has('member') &&
+        !params.has('members')
+      ) {
+        setIsAdminPortal(true);
+        if (params.get('vault_key') !== 'grd9942') {
+          try {
+            window.history.replaceState({}, '', '/?vault_key=grd9942');
+          } catch {
+            // ignore
+          }
+        }
+      }
     }
   }, [user]);
 

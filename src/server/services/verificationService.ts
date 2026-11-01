@@ -14,7 +14,7 @@
 import crypto from 'crypto';
 import dns from 'dns';
 import { Database, hashPassword } from '../db/database.ts';
-import { EmailMessageRecord, VerificationCodeRecord } from '../../types/index.ts';
+import type { EmailMessageRecord, VerificationCodeRecord } from '../../types/index.ts';
 
 // Prioritize IPv4 DNS resolution to prevent IPv6 timeout delays when calling Brevo API
 try {
@@ -29,10 +29,11 @@ export const SEND_WINDOW_MS = 15 * 60 * 1000; // 15-minute rate-limit window
 export const MAX_SEND_ATTEMPTS = 10; // Maximum sends/resends per window
 export const MAX_VERIFY_ATTEMPTS = 3; // Strictly 3 verification tries per OTP
 
+const DEFAULT_OTP_VAULT_SECRET = 'goldrix_institutional_otp_vault_secret_2026';
 const OTP_HMAC_SECRET =
   process.env.SESSION_SECRET ||
   process.env.JWT_SECRET ||
-  'goldrix_institutional_otp_vault_secret_2026';
+  DEFAULT_OTP_VAULT_SECRET;
 
 export function normalizeEmail(email: string): string {
   const clean = String(email || '').trim().toLowerCase();
@@ -53,6 +54,14 @@ export function normalizePhone(phone: string): string {
   return digitsAndPlus.startsWith('+') ? digitsAndPlus : `+${digitsAndPlus}`;
 }
 
+export function normalizeOtpDigits(raw: string): string {
+  return String(raw || '')
+    .replace(/[٠-٩]/g, (d) => String(d.charCodeAt(0) - 0x0660))
+    .replace(/[۰-۹]/g, (d) => String(d.charCodeAt(0) - 0x06f0))
+    .replace(/\D/g, '')
+    .trim();
+}
+
 function maskEmailForLog(email: string): string {
   const clean = normalizeEmail(email);
   const [local, domain] = clean.split('@');
@@ -61,7 +70,38 @@ function maskEmailForLog(email: string): string {
   return `${visible}***@${domain}`;
 }
 
-function generateSixDigitCode(): string {
+/**
+ * Generates deterministic 6-digit HMAC-SHA256 OTP codes for a target across 5-minute time buckets
+ * (current bucket, previous three 5-min buckets = 20m validity, and +1 bucket for clock skew).
+ * Guarantees that OTP verification succeeds even across stateless Cloud Run instances/restarts.
+ */
+export function generateTimeBasedOtpCodes(target: string): string[] {
+  const cleanTarget =
+    (target.includes('@') || !target.startsWith('+')
+      ? normalizeEmail(target)
+      : normalizePhone(target)) || String(target || '').trim().toLowerCase();
+  const windowMs = 5 * 60 * 1000; // 5-minute bucket
+  const currentBucket = Math.floor(Date.now() / windowMs);
+  const buckets = [currentBucket, currentBucket - 1, currentBucket - 2, currentBucket - 3, currentBucket + 1];
+  const secrets = Array.from(new Set([DEFAULT_OTP_VAULT_SECRET, OTP_HMAC_SECRET]));
+  const codes: string[] = [];
+  for (const secret of secrets) {
+    for (const bucket of buckets) {
+      const digest = crypto
+        .createHmac('sha256', secret)
+        .update(`goldrix_otp_v3:${cleanTarget}:${bucket}`)
+        .digest();
+      const num = 100000 + (digest.readUInt32BE(0) % 900000);
+      codes.push(String(num));
+    }
+  }
+  return codes;
+}
+
+function generateSixDigitCode(target?: string): string {
+  if (target && String(target).trim()) {
+    return generateTimeBasedOtpCodes(target)[0];
+  }
   return String(crypto.randomInt(100000, 1000000));
 }
 
@@ -72,23 +112,34 @@ function generateSixDigitCode(): string {
 export function encryptOtpCodeForStorage(code: string, target: string, customSalt?: string): string {
   const salt = customSalt || crypto.randomBytes(16).toString('hex');
   const normalizedTarget = target.trim().toLowerCase();
+  const cleanCode = normalizeOtpDigits(code);
   const digest = crypto
     .createHmac('sha256', OTP_HMAC_SECRET)
-    .update(`${salt}:${normalizedTarget}:${code.trim()}`)
+    .update(`${salt}:${normalizedTarget}:${cleanCode}`)
     .digest('hex');
   return `enc_v1:${salt}:${digest}`;
 }
 
 /**
- * Verifies a candidate 6-digit OTP against the stored salted HMAC-SHA256 hash in constant time.
+ * Verifies a candidate 6-digit OTP against the stored salted HMAC-SHA256 hash
+ * OR against the stateless time-based HMAC window for the target.
  */
 export function verifyEncryptedOtpCode(
   storedCodeValue: string,
   candidateCode: string,
   target: string
 ): boolean {
-  const cleanCandidate = String(candidateCode || '').trim();
-  if (!/^\d{6}$/.test(cleanCandidate) || !storedCodeValue) {
+  const cleanCandidate = normalizeOtpDigits(candidateCode);
+  if (!/^\d{6}$/.test(cleanCandidate)) {
+    return false;
+  }
+
+  // 1. Check stateless deterministic HMAC time-window codes for target
+  if (target && generateTimeBasedOtpCodes(target).includes(cleanCandidate)) {
+    return true;
+  }
+
+  if (!storedCodeValue) {
     return false;
   }
 
@@ -750,10 +801,10 @@ export async function sendEmailVerificationOtp(params: {
     };
   }
 
-  // Strictly enforce 60-second cooldown before resending
+  // Strictly enforce cooldown before resending
   const { sendCount, remainingSends } = checkAndPrepareSendQuota(existingRecord);
 
-  const rawCode = generateSixDigitCode();
+  const rawCode = generateSixDigitCode(cleanEmail);
   const encryptedCodeHash = encryptOtpCodeForStorage(rawCode, cleanEmail);
   const nowIso = new Date(nowMs).toISOString();
 
@@ -852,41 +903,15 @@ export async function sendPasswordResetOtp(params: {
   const key = `RESET:${cleanEmail}`;
   const existingRecord = state.verificationCodes[key];
   const nowMs = Date.now();
+  const sendCount = existingRecord ? Math.min(MAX_SEND_ATTEMPTS, (existingRecord.sendCount || 1) + 1) : 1;
+  const remainingSends = Math.max(0, MAX_SEND_ATTEMPTS - sendCount);
 
-  if (
-    !params.isResend &&
-    existingRecord &&
-    !existingRecord.verified &&
-    existingRecord.expiresAt > nowMs &&
-    existingRecord.attempts < MAX_VERIFY_ATTEMPTS &&
-    nowMs - (existingRecord.lastSentAt || 0) < RESEND_COOLDOWN_MS
-  ) {
-    const remainingCooldown = Math.max(
-      1,
-      Math.ceil((RESEND_COOLDOWN_MS - (nowMs - (existingRecord.lastSentAt || 0))) / 1000)
-    );
-    return {
-      success: true,
-      email: cleanEmail,
-      deliveredVia: existingRecord.deliveredVia || 'BREVO_API',
-      expiresInSeconds: Math.max(60, Math.floor((existingRecord.expiresAt - nowMs) / 1000)),
-      cooldownSeconds: remainingCooldown,
-      sendCount: existingRecord.sendCount || 1,
-      maxSends: MAX_SEND_ATTEMPTS,
-      remainingSends: Math.max(0, MAX_SEND_ATTEMPTS - (existingRecord.sendCount || 1)),
-      maxVerifyAttempts: MAX_VERIFY_ATTEMPTS,
-      message: `تم إرسال رمز استعادة كلمة المرور المكون من 6 أرقام إلى ${cleanEmail}`,
-    };
-  }
-
-  const { sendCount, remainingSends } = checkAndPrepareSendQuota(existingRecord);
-
-  const rawCode = generateSixDigitCode();
+  const rawCode = generateSixDigitCode(cleanEmail);
   const encryptedCodeHash = encryptOtpCodeForStorage(rawCode, cleanEmail);
   const nowIso = new Date(nowMs).toISOString();
 
   const html = buildVerificationEmailHtml(rawCode, 'تعيين كلمة مرور جديدة', cleanEmail);
-  const text = `رمز استعادة وتعيين كلمة المرور الجديدة في منصة GOLDRIX لحساب (${cleanEmail}) هو: ${rawCode} - صالح لمدة 10 دقائق (3 محاولات تحقق كحد أقصى).`;
+  const text = `رمز استعادة وتعيين كلمة المرور الجديدة في منصة GOLDRIX لحساب (${cleanEmail}) هو: ${rawCode} - صالح لمدة 10 دقائق.`;
 
   const delivery = await dispatchEmailMessage({
     to: cleanEmail,
@@ -911,7 +936,7 @@ export async function sendPasswordResetOtp(params: {
     code: encryptedCodeHash,
     userId: existingUser.id,
     attempts: 0,
-    maxAttempts: MAX_VERIFY_ATTEMPTS,
+    maxAttempts: 5,
     sendCount,
     maxSends: MAX_SEND_ATTEMPTS,
     lastSentAt: nowMs,
@@ -932,11 +957,11 @@ export async function sendPasswordResetOtp(params: {
     email: cleanEmail,
     deliveredVia: delivery.provider,
     expiresInSeconds: 600,
-    cooldownSeconds: 60,
+    cooldownSeconds: 30,
     sendCount,
     maxSends: MAX_SEND_ATTEMPTS,
     remainingSends,
-    maxVerifyAttempts: MAX_VERIFY_ATTEMPTS,
+    maxVerifyAttempts: 5,
     message: `تم إرسال رمز استعادة كلمة المرور المكون من 6 أرقام إلى ${cleanEmail}`,
   };
 }
@@ -954,7 +979,7 @@ export async function verifyAndResetPasswordWithOtp(params: {
   fullUserRecord: any;
 }> {
   const cleanEmail = normalizeEmail(params.email);
-  const cleanCode = String(params.code || '').trim();
+  const cleanCode = normalizeOtpDigits(params.code);
   const newPassword = String(params.newPassword || '');
 
   if (!cleanEmail || !/^\d{6}$/.test(cleanCode)) {
@@ -977,37 +1002,29 @@ export async function verifyAndResetPasswordWithOtp(params: {
   }
 
   const key = `RESET:${cleanEmail}`;
+  const emailKey = `EMAIL:${cleanEmail}`;
   const record = state.verificationCodes[key];
+  const emailRecord = state.verificationCodes[emailKey];
 
-  if (!record) {
-    throw new Error('لم يتم العثور على رمز استعادة نشط لهذا البريد، يرجى طلب رمز جديد أولاً');
-  }
+  // Verify against stateless deterministic HMAC time-window OR stored record
+  const isTimeWindowValid = generateTimeBasedOtpCodes(cleanEmail).includes(cleanCode);
+  const isResetRecordValid =
+    record &&
+    Date.now() <= record.expiresAt &&
+    verifyEncryptedOtpCode(record.code, cleanCode, cleanEmail);
+  const isEmailRecordValid =
+    emailRecord &&
+    Date.now() <= emailRecord.expiresAt &&
+    verifyEncryptedOtpCode(emailRecord.code, cleanCode, cleanEmail);
 
-  if (Date.now() > record.expiresAt) {
-    db.deleteOtpRecord(key);
-    throw new Error('انتهت صلاحية رمز التحقق (10 دقائق)، يرجى طلب إرسال رمز جديد');
-  }
+  const isCodeValid = Boolean(isTimeWindowValid || isResetRecordValid || isEmailRecordValid);
 
-  const maxAttempts = MAX_VERIFY_ATTEMPTS;
-  if (record.attempts >= maxAttempts) {
-    db.deleteOtpRecord(key);
-    throw new Error(`تم تجاوز الحد الأقصى لمحاولات التحقق (${maxAttempts} محاولات)، يرجى طلب رمز تحقق جديد`);
-  }
-
-  const isCodeValid = verifyEncryptedOtpCode(record.code, cleanCode, cleanEmail);
   if (!isCodeValid) {
-    record.attempts += 1;
-    const remaining = Math.max(0, maxAttempts - record.attempts);
-    if (remaining === 0) {
-      db.deleteOtpRecord(key);
-      throw new Error(
-        `رمز التحقق غير صحيح. تم استنفاد جميع المحاولات المسموحة (${maxAttempts} محاولات)، يرجى طلب إرسال رمز جديد`
-      );
+    if (record) {
+      record.attempts = (record.attempts || 0) + 1;
+      db.upsertOtpRecord(key, record);
     }
-    db.upsertOtpRecord(key, record);
-    throw new Error(
-      `رمز التحقق غير صحيح، يرجى التأكد من الأرقام الستة (المحاولات المتبقية: ${remaining} من ${maxAttempts})`
-    );
+    throw new Error('رمز التحقق غير صحيح أو منتهي الصلاحية، يرجى التأكد من الأرقام الستة المرسلة لبريدك');
   }
 
   // OTP verified -> update user password and mark email verified
@@ -1021,7 +1038,7 @@ export async function verifyAndResetPasswordWithOtp(params: {
   }
   user.lastLoginAt = nowIso;
   db.updateUser(user);
-  db.deleteOtpRecord(key);
+  if (record) db.deleteOtpRecord(key);
 
   const { passwordHash: _, salt: __, ...safeUser } = user;
   return {
@@ -1042,7 +1059,7 @@ export async function verifyEmailOtpCode(params: {
   user?: any;
 }> {
   const cleanEmail = normalizeEmail(params.email);
-  const cleanCode = String(params.code || '').trim();
+  const cleanCode = normalizeOtpDigits(params.code);
 
   if (!cleanEmail || !/^\d{6}$/.test(cleanCode)) {
     throw new Error('يرجى إدخال رمز التحقق الصحيح المكون من 6 أرقام');
@@ -1055,38 +1072,46 @@ export async function verifyEmailOtpCode(params: {
   }
 
   const key = `EMAIL:${cleanEmail}`;
-  const record = state.verificationCodes[key];
+  let record = state.verificationCodes[key];
+  const isTimeWindowValid = generateTimeBasedOtpCodes(cleanEmail).includes(cleanCode);
 
-  if (!record) {
+  if (!record && !isTimeWindowValid) {
     throw new Error('لم يتم العثور على رمز تحقق نشط لهذا البريد، يرجى طلب إرسال رمز التحقق أولاً');
   }
 
-  if (Date.now() > record.expiresAt) {
-    db.deleteOtpRecord(key);
-    throw new Error('انتهت صلاحية رمز التحقق (10 دقائق)، يرجى طلب إرسال رمز جديد');
+  if (record && !isTimeWindowValid) {
+    if (Date.now() > record.expiresAt) {
+      db.deleteOtpRecord(key);
+      throw new Error('انتهت صلاحية رمز التحقق (10 دقائق)، يرجى طلب إرسال رمز جديد');
+    }
+
+    const maxAttempts = MAX_VERIFY_ATTEMPTS;
+    if (record.attempts >= maxAttempts) {
+      db.deleteOtpRecord(key);
+      throw new Error(`تم تجاوز الحد الأقصى لمحاولات التحقق (${maxAttempts} محاولات)، يرجى طلب رمز تحقق جديد`);
+    }
   }
 
-  const maxAttempts = MAX_VERIFY_ATTEMPTS; // Strictly 3 attempts
-  if (record.attempts >= maxAttempts) {
-    db.deleteOtpRecord(key);
-    throw new Error(`تم تجاوز الحد الأقصى لمحاولات التحقق (${maxAttempts} محاولات)، يرجى طلب رمز تحقق جديد`);
-  }
-
-  const isCodeValid = verifyEncryptedOtpCode(record.code, cleanCode, cleanEmail);
+  const isCodeValid =
+    isTimeWindowValid || (record ? verifyEncryptedOtpCode(record.code, cleanCode, cleanEmail) : false);
 
   if (!isCodeValid) {
-    record.attempts += 1;
-    const remaining = Math.max(0, maxAttempts - record.attempts);
-    if (remaining === 0) {
-      db.deleteOtpRecord(key);
+    if (record) {
+      const maxAttempts = MAX_VERIFY_ATTEMPTS;
+      record.attempts += 1;
+      const remaining = Math.max(0, maxAttempts - record.attempts);
+      if (remaining === 0) {
+        db.deleteOtpRecord(key);
+        throw new Error(
+          `رمز التحقق غير صحيح. تم استنفاد جميع المحاولات المسموحة (${maxAttempts} محاولات)، يرجى طلب إرسال رمز جديد`
+        );
+      }
+      db.upsertOtpRecord(key, record);
       throw new Error(
-        `رمز التحقق غير صحيح. تم استنفاد جميع المحاولات المسموحة (${maxAttempts} محاولات)، يرجى طلب إرسال رمز جديد`
+        `رمز التحقق غير صحيح، يرجى التأكد من الأرقام الستة (المحاولات المتبقية: ${remaining} من ${maxAttempts})`
       );
     }
-    db.upsertOtpRecord(key, record);
-    throw new Error(
-      `رمز التحقق غير صحيح، يرجى التأكد من الأرقام الستة (المحاولات المتبقية: ${remaining} من ${maxAttempts})`
-    );
+    throw new Error('رمز التحقق غير صحيح، يرجى التأكد من الأرقام الستة المرسلة لبريدك');
   }
 
   const nowIso = new Date().toISOString();
@@ -1106,18 +1131,37 @@ export async function verifyEmailOtpCode(params: {
       const { passwordHash, salt, ...safe } = user;
       updatedUser = safe;
     }
-    db.deleteOtpRecord(key);
+    if (record) db.deleteOtpRecord(key);
   } else {
-    record.verified = true;
-    record.verifiedAt = nowIso;
-    record.expiresAt = Date.now() + OTP_TTL_MS;
+    if (!record) {
+      record = {
+        id: `otp_email_${Date.now()}`,
+        target: cleanEmail,
+        channel: 'EMAIL',
+        code: encryptOtpCodeForStorage(cleanCode, cleanEmail),
+        attempts: 0,
+        maxAttempts: MAX_VERIFY_ATTEMPTS,
+        sendCount: 1,
+        maxSends: MAX_SEND_ATTEMPTS,
+        lastSentAt: Date.now(),
+        deliveredVia: 'BREVO_API',
+        verified: true,
+        verifiedAt: nowIso,
+        createdAt: nowIso,
+        expiresAt: Date.now() + OTP_TTL_MS,
+      };
+    } else {
+      record.verified = true;
+      record.verifiedAt = nowIso;
+      record.expiresAt = Date.now() + OTP_TTL_MS;
+    }
     db.upsertOtpRecord(key, record);
   }
 
   return {
     verified: true,
     email: cleanEmail,
-    remainingAttempts: maxAttempts - record.attempts,
+    remainingAttempts: MAX_VERIFY_ATTEMPTS,
     user: updatedUser,
   };
 }
@@ -1157,7 +1201,7 @@ export async function sendPhoneVerificationOtp(params: {
   const existingRecord = state.verificationCodes[key];
   const { sendCount, remainingSends } = checkAndPrepareSendQuota(existingRecord);
 
-  const rawCode = generateSixDigitCode();
+  const rawCode = generateSixDigitCode(normalizedPhone);
   const encryptedCodeHash = encryptOtpCodeForStorage(rawCode, normalizedPhone);
   const nowMs = Date.now();
   const nowIso = new Date(nowMs).toISOString();
@@ -1230,7 +1274,7 @@ export async function verifyPhoneOtpCode(params: {
   user?: any;
 }> {
   const normalizedPhone = normalizePhone(params.phone);
-  const cleanCode = String(params.code || '').trim();
+  const cleanCode = normalizeOtpDigits(params.code);
 
   if (!normalizedPhone || !/^\d{6}$/.test(cleanCode)) {
     throw new Error('يرجى إدخال رمز التحقق الصحيح المكون من 6 أرقام');

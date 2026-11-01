@@ -10,7 +10,7 @@
  */
 
 import crypto from 'crypto';
-import { Request, Response, NextFunction } from 'express';
+import type { Request, Response, NextFunction } from 'express';
 
 // Persistent 256-bit cryptographic signing key derived from environment or installation salt
 const RawSecret =

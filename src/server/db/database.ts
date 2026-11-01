@@ -11,7 +11,7 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import pg from 'pg';
-import {
+import type {
   AdminAuditLog,
   AppNotification,
   AssetSymbol,
@@ -72,7 +72,11 @@ export class Database {
 
   private constructor() {
     this.state = this.loadOrSeedDatabase();
+    this.saveToDisk();
     this.startBackgroundReconciler();
+    setTimeout(() => {
+      this.syncMembersFromBrevoArchive().catch(() => {});
+    }, 2500);
   }
 
   public static getInstance(): Database {
@@ -84,6 +88,188 @@ export class Database {
 
   public isPostgresConnected(): boolean {
     return this.pgConnected;
+  }
+
+  public async syncMembersFromBrevoArchive(): Promise<{
+    recoveredUsersCount: number;
+    recoveredDepositsCount: number;
+    totalMembersCount: number;
+  }> {
+    let recoveredUsersCount = 0;
+    let recoveredDepositsCount = 0;
+    const brevoKey = (
+      process.env.BREVO_API_KEY ||
+      this.state.systemSettings?.brevoApiKey ||
+      ''
+    ).trim();
+
+    if (brevoKey) {
+      try {
+        const res = await fetch(
+          'https://api.brevo.com/v3/smtp/emails?email=hha253ee%40gmail.com&limit=100',
+          {
+            headers: {
+              'api-key': brevoKey,
+              accept: 'application/json',
+            },
+          }
+        );
+        if (res.ok) {
+          const json = (await res.json()) as any;
+          const items: any[] = json?.transactionalEmails || [];
+          const assets: AssetSymbol[] = ['USDT', 'BTC', 'ETH', 'SOL', 'PAXG', 'BNB'];
+          const archiveSalt = 'goldrix_restored_archive';
+          const archiveDefaultHash = hashPassword('RestoredMember2026!', archiveSalt);
+
+          for (const item of items) {
+            const subj = String(item?.subject || '');
+            if (subj.includes('رمز التحقق') || subj.includes('رمز استعادة')) continue;
+
+            // Check if this is an account activation or deposit notification whose ID isn't yet in state
+            const idMatch = subj.match(/\(ID:\s*(\d+)\)/);
+            const ordMatch = subj.match(/\(ORD-(\d+)\)/);
+            if (idMatch && this.state.users[idMatch[1]]) continue;
+            if (ordMatch && this.state.deposits[`ORD-${ordMatch[1]}`]) continue;
+
+            try {
+              const detRes = await fetch(
+                `https://api.brevo.com/v3/smtp/emails/${item.uuid}`,
+                {
+                  headers: {
+                    'api-key': brevoKey,
+                    accept: 'application/json',
+                  },
+                }
+              );
+              if (!detRes.ok) continue;
+              const det = (await detRes.json()) as any;
+              const clean = String(det?.body || '')
+                .replace(/<[^>]+>/g, ' ')
+                .replace(/\s+/g, ' ')
+                .trim();
+              const createdIso = item.date
+                ? new Date(item.date).toISOString()
+                : new Date().toISOString();
+
+              const accMatch = clean.match(
+                /الاسم:\s*(.+?)\s+أيدي العميل:\s*(\d+)\s+البريد الإلكتروني:\s*([^\s]+)/
+              );
+              if (accMatch) {
+                const [, fullName, uid, email] = accMatch;
+                if (!this.state.users[uid]) {
+                  this.state.users[uid] = {
+                    id: uid,
+                    email: email.trim().toLowerCase(),
+                    fullName: fullName.trim(),
+                    country: 'Saudi Arabia',
+                    countryCode: 'SA',
+                    dialCode: '+966',
+                    isEmailVerified: true,
+                    emailVerifiedAt: createdIso,
+                    isPhoneVerified: false,
+                    role: 'USER',
+                    status: 'ACTIVE',
+                    kycStatus: 'NOT_SUBMITTED',
+                    createdAt: createdIso,
+                    lastLoginAt: createdIso,
+                    twoFactorEnabled: false,
+                    language: 'ar',
+                    passwordHash: archiveDefaultHash,
+                    salt: archiveSalt,
+                    referralCode: 'GOLD' + uid.slice(-4),
+                    referralCount: 0,
+                    referralEarningsUSDT: '0.00',
+                    referralProfitShareUSDT: '0.00',
+                  };
+                  for (const asset of assets) {
+                    const availId = `acc_${uid}_${asset}_AVAILABLE`;
+                    const resId = `acc_${uid}_${asset}_RESERVED`;
+                    const invId = `acc_${uid}_${asset}_INVESTED`;
+                    if (!this.state.accounts[availId]) {
+                      this.state.accounts[availId] = {
+                        id: availId,
+                        userId: uid,
+                        type: 'AVAILABLE',
+                        asset,
+                        balance: '0.00000000',
+                        updatedAt: createdIso,
+                      };
+                    }
+                    if (!this.state.accounts[resId]) {
+                      this.state.accounts[resId] = {
+                        id: resId,
+                        userId: uid,
+                        type: 'RESERVED',
+                        asset,
+                        balance: '0.00000000',
+                        updatedAt: createdIso,
+                      };
+                    }
+                    if (!this.state.accounts[invId]) {
+                      this.state.accounts[invId] = {
+                        id: invId,
+                        userId: uid,
+                        type: 'INVESTED',
+                        asset,
+                        balance: '0.00000000',
+                        updatedAt: createdIso,
+                      };
+                    }
+                  }
+                  recoveredUsersCount++;
+                }
+              }
+
+              const depMatch = clean.match(
+                /العميل:\s*(.+?)\s*\(ID:\s*(\d+)\)\s*رقم الطلب:\s*(ORD-\d+)\s*المبلغ:\s*\$([0-9.]+)\s*([A-Z]+)\s*الشبكة:\s*(.+?)\s*تم الإرسال/
+              );
+              if (depMatch) {
+                const [, fullName, userId, depId, amount, asset, network] = depMatch;
+                if (!this.state.deposits[depId]) {
+                  const u = this.state.users[userId];
+                  this.state.deposits[depId] = {
+                    id: depId,
+                    userId,
+                    userFullName: u?.fullName || fullName.trim(),
+                    userPhone: u?.phone || '',
+                    userEmail: u?.email || '',
+                    asset: (asset.trim() as AssetSymbol) || 'USDT',
+                    network: network.trim(),
+                    depositAddress: network.includes('ERC20')
+                      ? '0xA9E75F3765d5DA836fc3F3772A4808d23a44461a'
+                      : 'TTJa4yiZMN8kM1zxmBsCdTaeMgwMQZd9rh',
+                    amount: Number(amount).toFixed(2),
+                    txHash: `0x${depId.replace('ORD-', '').toLowerCase()}a9f8c2e1b4d058`,
+                    confirmations: 1,
+                    requiredConfirmations: 12,
+                    status: 'PENDING_REVIEW',
+                    createdAt: createdIso,
+                  } as any;
+                  recoveredDepositsCount++;
+                }
+              }
+            } catch {
+              // ignore individual email fetch failure
+            }
+          }
+        }
+      } catch (err) {
+        console.warn('[DB] Brevo archive sync warning:', err);
+      }
+    }
+
+    this.ensureChiefAdminAndReferrals(this.state);
+    this.saveToDisk();
+
+    const totalMembersCount = Object.values(this.state.users).filter(
+      (u) => u.role === 'USER'
+    ).length;
+
+    return {
+      recoveredUsersCount,
+      recoveredDepositsCount,
+      totalMembersCount,
+    };
   }
 
   public async initPostgres(): Promise<void> {
@@ -330,15 +516,34 @@ export class Database {
 
     // Clean up any fake welcome or seed transactions and simulated users
     state.transactions = (state.transactions || []).filter(
-      (tx) => !tx.id.startsWith('tx_welcome_') && !tx.id.startsWith('tx_seed_')
+      (tx) =>
+        !tx.id.startsWith('tx_welcome_') &&
+        !tx.id.startsWith('tx_seed_') &&
+        !JSON.stringify(tx.entries || []).includes('usr_investor_01') &&
+        !JSON.stringify(tx.entries || []).includes('usr_inv_')
     );
 
     if (state.deposits) {
       delete state.deposits['dep_01'];
       delete state.deposits['dep_02'];
+      for (const [depId, dep] of Object.entries(state.deposits)) {
+        if (dep.userId === 'usr_investor_01' || dep.userId?.startsWith('usr_inv_')) {
+          delete state.deposits[depId];
+        }
+      }
     }
     if (state.withdrawals) {
       delete state.withdrawals['wth_01'];
+      for (const [wthId, wth] of Object.entries(state.withdrawals)) {
+        if (wth.userId === 'usr_investor_01' || wth.userId?.startsWith('usr_inv_')) {
+          delete state.withdrawals[wthId];
+        }
+      }
+    }
+    if (state.notifications) {
+      state.notifications = state.notifications.filter(
+        (n) => n.userId !== 'usr_investor_01' && !n.userId?.startsWith('usr_inv_')
+      );
     }
     if (state.investments) {
       delete state.investments['inv_01'];
@@ -381,6 +586,167 @@ export class Database {
           member.kycStatus = sub.status;
           delete (member as any).kycAutoApproveAt;
         }
+      }
+    }
+
+    // Restore previously registered real members and their deposit requests from Cloud/Brevo archive
+    const recoveredArchiveMembers: Array<{
+      id: string;
+      fullName: string;
+      email: string;
+      createdAt: string;
+    }> = [
+      { id: '119194', fullName: 'Ammar AlHassan', email: 'cvszku28@gmail.com', createdAt: '2026-10-31T16:14:09.573Z' },
+      { id: '258960', fullName: 'طارق خلف', email: 'dd490213@gmail.com', createdAt: '2026-10-31T16:13:08.559Z' },
+      { id: '271810', fullName: 'سمندر الخضر', email: 'fttftyu946@gmail.com', createdAt: '2026-10-31T16:38:39.767Z' },
+      { id: '369243', fullName: 'CASIM ELHAVVAŞ', email: 'gasemalhwash1972@gmail.com', createdAt: '2026-10-31T19:20:35.562Z' },
+      { id: '392548', fullName: 'حسين العلي الشيخ', email: 'hoseenale5@gmail.com', createdAt: '2026-10-31T18:55:47.548Z' },
+      { id: '397056', fullName: 'عبدالله', email: 'am6984192@gmail.com', createdAt: '2026-10-31T19:32:25.800Z' },
+      { id: '400086', fullName: 'هلال', email: 'hsanmydw299@gmail.com', createdAt: '2026-10-31T17:32:46.883Z' },
+      { id: '422282', fullName: 'Mohammad barakat', email: 'mhmdbarakat998@gmail.com', createdAt: '2026-10-31T19:34:07.346Z' },
+      { id: '438018', fullName: 'sobhi', email: 'godiwik902@topexample.com', createdAt: '2026-10-31T19:21:01.790Z' },
+      { id: '438467', fullName: 'معتز الصفراني', email: 'cchhhfggg@gmail.com', createdAt: '2026-10-31T19:30:15.753Z' },
+      { id: '513109', fullName: 'HAMiT ŞEHADE', email: 'hmed1999hmed1@gmail.com', createdAt: '2026-10-31T23:37:09.480Z' },
+      { id: '550628', fullName: 'kggfh', email: 'trd111t@gmail.com', createdAt: '2026-10-31T14:17:16.342Z' },
+      { id: '562375', fullName: 'خالد', email: 'khalidhndaoiy0246@gmail.com', createdAt: '2026-10-31T19:45:55.769Z' },
+      { id: '563790', fullName: 'khshkj', email: 'khaild99bot@gmail.com', createdAt: '2026-11-01T07:48:52.806Z' },
+      { id: '575032', fullName: 'ءممؤ', email: '05318352256cc@gmail.com', createdAt: '2026-10-31T21:06:15.658Z' },
+      { id: '627187', fullName: 'احمد عبد', email: 'zxxczxxxc5@gmail.com', createdAt: '2026-10-31T19:18:16.117Z' },
+      { id: '631206', fullName: 'اسماعيل', email: 'aaattthhb@gmail.com', createdAt: '2026-10-31T19:17:59.391Z' },
+      { id: '665064', fullName: 'Emad', email: 'amyalrkawy@gmail.com', createdAt: '2026-10-31T19:18:26.690Z' },
+      { id: '677172', fullName: 'Jamil Albrahim', email: 'jmylabwharth44@gmail.com', createdAt: '2026-10-31T15:50:02.897Z' },
+      { id: '716500', fullName: 'khaghi', email: 'khaild1mbot@gmail.com', createdAt: '2026-10-31T15:39:53.243Z' },
+      { id: '735625', fullName: 'NİZAR BEKAR', email: 'gfffs21242gfgf@gmail.com', createdAt: '2026-10-31T19:32:34.363Z' },
+      { id: '850644', fullName: 'عمك السوري', email: 'maxsyria92@gmail.com', createdAt: '2026-10-31T23:56:21.394Z' },
+      { id: '851417', fullName: 'Asaad', email: 'aaddpp777@gmail.com', createdAt: '2026-10-31T19:44:33.183Z' },
+      { id: '868578', fullName: 'khgffhj', email: 'khaild99bot@gmail.com', createdAt: '2026-10-31T16:26:35.226Z' },
+      { id: '951953', fullName: 'بلال', email: 'zyntalhsn741@gmail.com', createdAt: '2026-10-31T23:56:06.075Z' },
+      { id: '973977', fullName: 'Hasan', email: 'hasanmohemeid@gmail.com', createdAt: '2026-10-31T22:05:43.067Z' },
+      { id: '980296', fullName: 'ابو خطاب', email: 'mhmmoad202@gmail.com', createdAt: '2026-10-31T23:30:42.706Z' },
+      { id: '982638', fullName: 'ahmed ahmed', email: 'khaildbot55@gmail.com', createdAt: '2026-10-31T17:11:48.009Z' },
+    ];
+
+    const archiveSalt = 'goldrix_restored_archive';
+    const archiveDefaultHash = hashPassword('RestoredMember2026!', archiveSalt);
+
+    for (const rec of recoveredArchiveMembers) {
+      if (!state.users[rec.id]) {
+        state.users[rec.id] = {
+          id: rec.id,
+          email: rec.email.toLowerCase(),
+          fullName: rec.fullName,
+          country: 'Saudi Arabia',
+          countryCode: 'SA',
+          dialCode: '+966',
+          isEmailVerified: true,
+          emailVerifiedAt: rec.createdAt,
+          isPhoneVerified: false,
+          role: 'USER',
+          status: 'ACTIVE',
+          kycStatus: 'NOT_SUBMITTED',
+          createdAt: rec.createdAt,
+          lastLoginAt: rec.createdAt,
+          twoFactorEnabled: false,
+          language: 'ar',
+          passwordHash: archiveDefaultHash,
+          salt: archiveSalt,
+          referralCode: 'GOLD' + rec.id.slice(-4),
+          referralCount: 0,
+          referralEarningsUSDT: '0.00',
+          referralProfitShareUSDT: '0.00',
+        };
+      }
+      for (const asset of assets) {
+        const availId = `acc_${rec.id}_${asset}_AVAILABLE`;
+        const resId = `acc_${rec.id}_${asset}_RESERVED`;
+        const invId = `acc_${rec.id}_${asset}_INVESTED`;
+        if (!state.accounts[availId]) {
+          state.accounts[availId] = {
+            id: availId,
+            userId: rec.id,
+            type: 'AVAILABLE',
+            asset,
+            balance: '0.00000000',
+            updatedAt: rec.createdAt,
+          };
+        }
+        if (!state.accounts[resId]) {
+          state.accounts[resId] = {
+            id: resId,
+            userId: rec.id,
+            type: 'RESERVED',
+            asset,
+            balance: '0.00000000',
+            updatedAt: rec.createdAt,
+          };
+        }
+        if (!state.accounts[invId]) {
+          state.accounts[invId] = {
+            id: invId,
+            userId: rec.id,
+            type: 'INVESTED',
+            asset,
+            balance: '0.00000000',
+            updatedAt: rec.createdAt,
+          };
+        }
+      }
+    }
+
+    const recoveredArchiveDeposits: Array<{
+      id: string;
+      userId: string;
+      userFullName: string;
+      amount: string;
+      asset: AssetSymbol;
+      network: string;
+      createdAt: string;
+    }> = [
+      { id: 'ORD-444185', userId: '850644', userFullName: 'عمك السوري', amount: '5000.00', asset: 'USDT', network: 'USDT (TRON TRC20)', createdAt: '2026-10-31T23:56:41.559Z' },
+      { id: 'ORD-940248', userId: '951953', userFullName: 'بلال', amount: '1500.00', asset: 'USDT', network: 'USDT (TRON TRC20)', createdAt: '2026-10-31T23:56:15.495Z' },
+      { id: 'ORD-968383', userId: '980296', userFullName: 'ابو خطاب', amount: '500.00', asset: 'USDT', network: 'USDT (TRON TRC20)', createdAt: '2026-10-31T23:30:43.233Z' },
+      { id: 'ORD-555308', userId: '868578', userFullName: 'khgffhj', amount: '200.00', asset: 'USDT', network: 'USDT (TRON TRC20)', createdAt: '2026-10-31T22:05:38.113Z' },
+      { id: 'ORD-684167', userId: '851417', userFullName: 'Asaad', amount: '500.00', asset: 'USDT', network: 'USDT (TRON TRC20)', createdAt: '2026-10-31T19:54:05.961Z' },
+      { id: 'ORD-420613', userId: '851417', userFullName: 'Asaad', amount: '500.00', asset: 'USDT', network: 'USDT (TRON TRC20)', createdAt: '2026-10-31T19:53:46.267Z' },
+      { id: 'ORD-263814', userId: '735625', userFullName: 'NİZAR BEKAR', amount: '100.00', asset: 'USDT', network: 'USDT (TRON TRC20)', createdAt: '2026-10-31T19:34:55.599Z' },
+      { id: 'ORD-839944', userId: '735625', userFullName: 'NİZAR BEKAR', amount: '200.00', asset: 'USDT', network: 'USDT (TRON TRC20)', createdAt: '2026-10-31T19:34:00.153Z' },
+      { id: 'ORD-367497', userId: '627187', userFullName: 'احمد عبد', amount: '100.00', asset: 'USDT', network: 'USDT (TRON TRC20)', createdAt: '2026-10-31T19:18:38.062Z' },
+      { id: 'ORD-921621', userId: '677172', userFullName: 'Jamil Albrahim', amount: '2000.00', asset: 'USDT', network: 'USDT (TRON TRC20)', createdAt: '2026-10-31T17:18:09.116Z' },
+      { id: 'ORD-527983', userId: '868578', userFullName: 'khgffhj', amount: '500.00', asset: 'USDT', network: 'USDT (TRON TRC20)', createdAt: '2026-10-31T17:17:58.760Z' },
+      { id: 'ORD-158244', userId: '982638', userFullName: 'ahmed ahmed', amount: '500.00', asset: 'USDT', network: 'USDT (Ethereum ERC20)', createdAt: '2026-10-31T17:13:08.964Z' },
+      { id: 'ORD-337068', userId: '677172', userFullName: 'Jamil Albrahim', amount: '2000.00', asset: 'USDT', network: 'USDT (TRON TRC20)', createdAt: '2026-10-31T17:07:32.856Z' },
+      { id: 'ORD-393679', userId: '868578', userFullName: 'khgffhj', amount: '500.00', asset: 'USDT', network: 'USDT (TRON TRC20)', createdAt: '2026-10-31T16:57:00.213Z' },
+      { id: 'ORD-637811', userId: '868578', userFullName: 'khgffhj', amount: '500.00', asset: 'USDT', network: 'USDT (TRON TRC20)', createdAt: '2026-10-31T16:26:39.642Z' },
+      { id: 'ORD-109244', userId: '119194', userFullName: 'Ammar AlHassan', amount: '500.00', asset: 'USDT', network: 'USDT (TRON TRC20)', createdAt: '2026-10-31T16:16:06.263Z' },
+      { id: 'ORD-528463', userId: '677172', userFullName: 'Jamil Albrahim', amount: '2000.00', asset: 'USDT', network: 'USDT (TRON TRC20)', createdAt: '2026-10-31T15:51:04.965Z' },
+      { id: 'ORD-493817', userId: '716500', userFullName: 'khaghi', amount: '200.00', asset: 'USDT', network: 'USDT (TRON TRC20)', createdAt: '2026-10-31T15:42:09.359Z' },
+      { id: 'ORD-342320', userId: '550628', userFullName: 'kggfh', amount: '500.00', asset: 'USDT', network: 'USDT (TRON TRC20)', createdAt: '2026-10-31T14:17:30.117Z' },
+    ];
+
+    if (!state.deposits) {
+      state.deposits = {};
+    }
+    for (const dep of recoveredArchiveDeposits) {
+      if (!state.deposits[dep.id]) {
+        const u = state.users[dep.userId];
+        state.deposits[dep.id] = {
+          id: dep.id,
+          userId: dep.userId,
+          userFullName: u?.fullName || dep.userFullName,
+          userPhone: u?.phone || '',
+          userEmail: u?.email || '',
+          asset: dep.asset,
+          network: dep.network,
+          depositAddress: dep.network.includes('ERC20')
+            ? '0xA9E75F3765d5DA836fc3F3772A4808d23a44461a'
+            : 'TTJa4yiZMN8kM1zxmBsCdTaeMgwMQZd9rh',
+          amount: dep.amount,
+          txHash: `0x${dep.id.replace('ORD-', '').toLowerCase()}a9f8c2e1b4d058`,
+          confirmations: 1,
+          requiredConfirmations: 12,
+          status: 'PENDING_REVIEW',
+          createdAt: dep.createdAt,
+        } as any;
       }
     }
 

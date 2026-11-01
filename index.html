@@ -22,6 +22,24 @@
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=Cairo:wght@400;600;700&display=swap" rel="stylesheet">
     <script>
       (function () {
+        // Immediately unregister any stale Service Workers and clear outdated Workbox caches that cause 404 warm-up errors
+        try {
+          if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.getRegistrations().then(function (regs) {
+              for (var i = 0; i < regs.length; i++) {
+                regs[i].unregister();
+              }
+            });
+          }
+          if ('caches' in window) {
+            caches.keys().then(function (keys) {
+              for (var j = 0; j < keys.length; j++) {
+                caches.delete(keys[j]);
+              }
+            });
+          }
+        } catch (err) {}
+
         // Capture PWA beforeinstallprompt immediately before React mounts so native App Icon install always works on first tap
         window.__deferredPwaPrompt = null;
         window.addEventListener('beforeinstallprompt', function (e) {

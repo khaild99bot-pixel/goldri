@@ -50,12 +50,19 @@ function isValidGmail(email: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/i.test(email.trim());
 }
 
+function normalizeOtpDigitsClient(raw: string): string {
+  return String(raw || '')
+    .replace(/[٠-٩]/g, (d) => String(d.charCodeAt(0) - 0x0660))
+    .replace(/[۰-۹]/g, (d) => String(d.charCodeAt(0) - 0x06f0))
+    .replace(/\D/g, '');
+}
+
 export const AuthModal: React.FC<AuthModalProps> = ({
   isOpen,
   onClose,
   initialMode = 'LOGIN',
 }) => {
-  const { login, register } = useAuth();
+  const { login, register, refreshUserData, refreshBalances } = useAuth();
   const { isRtl } = useLanguage();
 
   const [mode, setMode] = useState<AuthMode>(initialMode);
@@ -235,7 +242,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     }
 
     if (mode === 'FORGOT_PASSWORD') {
-      const cleanResetCode = resetOtpCode.replace(/\D/g, '').trim();
+      const cleanResetCode = normalizeOtpDigitsClient(resetOtpCode).slice(0, 6);
       if (!cleanResetCode) {
         await handleSendPasswordResetCode(false);
         return;
@@ -251,12 +258,18 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
       setIsSubmitting(true);
       try {
-        await api.resetPasswordWithOtp({
+        const res = await api.resetPasswordWithOtp({
           email: resolvedEmail,
           code: cleanResetCode,
           newPassword: password,
         });
-        await login(resolvedEmail, password);
+        if (res.token) {
+          api.setToken(res.token);
+          await refreshUserData();
+          await refreshBalances();
+        } else {
+          await login(resolvedEmail, password);
+        }
         onClose();
       } catch (err: any) {
         setErrorMessage(
@@ -320,7 +333,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
   const handleOtpDigitChange = (index: number, rawValue: string) => {
     setErrorMessage(null);
-    const digitsOnly = rawValue.replace(/\D/g, '');
+    const digitsOnly = normalizeOtpDigitsClient(rawValue);
 
     if (digitsOnly.length > 1) {
       const pasted = digitsOnly.slice(0, 6).split('');
@@ -598,6 +611,13 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                     className="w-full pl-9 pr-3 py-2.5 bg-neutral-950 border border-neutral-800 focus:border-emerald-500 rounded-xl text-xs sm:text-sm text-white text-left font-mono focus:outline-none transition-colors"
                   />
                 </div>
+                {resolvedEmail === 'hha253ee@gmail.com' && (
+                  <p className="mt-1 text-[10px] text-amber-400 font-bold">
+                    {isRtl
+                      ? 'تم التعرف على بريد الإدارة العليا — سيتم فتح لوحة التحكم السرية فور الدخول.'
+                      : 'Chief Admin email recognized — Secret Admin Console will open upon sign-in.'}
+                  </p>
+                )}
               </div>
 
               {/* Forgot Password: Sleek Inline Code Input + Send Button */}
@@ -616,7 +636,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                       placeholder="123456"
                       value={resetOtpCode}
                       onChange={(e) => {
-                        const digits = e.target.value.replace(/\D/g, '').slice(0, 6);
+                        const digits = normalizeOtpDigitsClient(e.target.value).slice(0, 6);
                         setResetOtpCode(digits);
                         if (errorMessage) setErrorMessage(null);
                       }}

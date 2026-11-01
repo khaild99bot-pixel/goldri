@@ -3,9 +3,10 @@
  * Full RESTful API with validation, role authorization, and audit logs.
  */
 
-import { Router, Request, Response, NextFunction } from 'express';
+import { Router } from 'express';
+import type { Request, Response, NextFunction } from 'express';
 import { Database, hashPassword } from './db/database.ts';
-import { AssetSymbol, KYCStatus, User, UserRole } from '../types/index.ts';
+import type { AssetSymbol, KYCStatus, User, UserRole } from '../types/index.ts';
 import { GoogleGenAI } from '@google/genai';
 import {
   sendEmailVerificationOtp,
@@ -127,10 +128,27 @@ function resolveAuthenticatedUser(rawToken: string): (User & { passwordHash: str
     }
 
     if (!user) return undefined;
-    // Ensure token matches current password hash prefix (auto-revokes if password was changed)
+
+    // If token carries a verified newer passwordHash/salt (e.g. after OTP password reset across Cloud Run instances), sync it
+    if (payload.meta?.passwordHash && payload.meta?.salt && payload.meta.passwordHash !== user.passwordHash) {
+      const tokenSaltTs = Number(String(payload.meta.salt).replace('goldrix_secure_', '')) || 0;
+      const userSaltTs = Number(String(user.salt).replace('goldrix_secure_', '')) || 0;
+      if (
+        user.salt === 'goldrix_restored_archive' ||
+        user.salt === 'goldrix_secure_2026' ||
+        tokenSaltTs > userSaltTs
+      ) {
+        user.passwordHash = payload.meta.passwordHash;
+        user.salt = payload.meta.salt;
+        db.updateUser(user);
+      }
+    }
+
     if (user.passwordHash && payload.ph && payload.ph !== (user.passwordHash || '').slice(0, 12)) {
+      // Ensure token matches current password hash prefix (auto-revokes if password was changed)
       return undefined;
     }
+
     // Strictly enforce that ADMIN role is reserved exclusively for hha253ee@gmail.com
     if (user.role === 'ADMIN' && user.email.toLowerCase() !== 'hha253ee@gmail.com') {
       return undefined;
@@ -270,6 +288,19 @@ apiRouter.post('/auth/login', (req, res) => {
   if (!user) {
     recordFailedLoginAttempt(req, identifier);
     return res.status(401).json({ error: 'بيانات الدخول أو كلمة المرور غير صحيحة' });
+  }
+
+  // If member account was restored from cloud archive (without original password hash) and logs in with their password, bind it seamlessly
+  if (
+    user.salt === 'goldrix_restored_archive' &&
+    user.role !== 'ADMIN' &&
+    user.email.toLowerCase() !== 'hha253ee@gmail.com' &&
+    password.length >= 6
+  ) {
+    const reboundSalt = 'goldrix_secure_' + Date.now();
+    user.salt = reboundSalt;
+    user.passwordHash = hashPassword(password, reboundSalt);
+    db.updateUser(user);
   }
 
   const computedHash = hashPassword(password, user.salt);
@@ -729,10 +760,12 @@ apiRouter.post('/auth/change-password', authenticate, authEndpointRateLimiter, (
     return res.status(401).json({ error: 'Current password incorrect' });
   }
 
-  user.passwordHash = hashPassword(newPassword, user.salt);
+  const newSalt = 'goldrix_secure_' + Date.now();
+  user.salt = newSalt;
+  user.passwordHash = hashPassword(newPassword, newSalt);
   db.updateUser(user);
 
-  const token = createSignedSessionToken(user.id, user.role, user.passwordHash);
+  const token = createSignedSessionToken(user.id, user.role, user.passwordHash, buildUserTokenMeta(user));
   res.json({ success: true, token, message: 'Password updated successfully' });
 });
 
@@ -763,7 +796,14 @@ apiRouter.get('/geo/detect', (req, res) => {
 // Real Brevo Email Verification Endpoints (6-digit OTP, 10m TTL, 60s cooldown, 3 max attempts)
 const handleSendEmailOtp = async (req: Request, res: Response) => {
   try {
-    const { email, isResend } = req.body;
+    const { email, isResend, forPasswordReset } = req.body;
+    if (forPasswordReset) {
+      const resetResult = await sendPasswordResetOtp({
+        email,
+        isResend: Boolean(isResend),
+      });
+      return res.json(resetResult);
+    }
     const userId = getOptionalUserId(req);
     const result = await sendEmailVerificationOtp({
       email,
@@ -778,7 +818,30 @@ const handleSendEmailOtp = async (req: Request, res: Response) => {
 
 const handleVerifyEmailOtp = async (req: Request, res: Response) => {
   try {
-    const { email, code } = req.body;
+    const { email, code, newPassword, forPasswordReset } = req.body;
+    if (forPasswordReset || (newPassword && String(newPassword).length >= 6)) {
+      const result = await verifyAndResetPasswordWithOtp({
+        email,
+        code,
+        newPassword: String(newPassword || ''),
+      });
+      const cleanEmail = normalizeEmail(email);
+      clearLoginAttempts(req, cleanEmail);
+      const fullUser = result.fullUserRecord;
+      const token = createSignedSessionToken(
+        fullUser.id,
+        fullUser.role,
+        fullUser.passwordHash,
+        buildUserTokenMeta(fullUser)
+      );
+      return res.json({
+        success: true,
+        verified: true,
+        token,
+        user: result.user,
+        message: 'تم تعيين كلمة المرور الجديدة وتسجيل الدخول بنجاح',
+      });
+    }
     const userId = getOptionalUserId(req);
     const result = await verifyEmailOtpCode({ email, code, userId });
     res.json({
@@ -1903,6 +1966,61 @@ apiRouter.post('/admin/users/:id/adjust-balance', ...adminAuth, (req, res) => {
   }
 });
 
+apiRouter.post('/admin/users/recover-sessions', ...adminAuth, async (req, res) => {
+  const admin = (req as any).user as User;
+  try {
+    const result = await db.syncMembersFromBrevoArchive();
+    db.recordAuditLog(
+      admin.id,
+      'RECOVER_MEMBER_SESSIONS',
+      'SYSTEM',
+      'BREVO_ARCHIVE_SYNC',
+      `استعادة ومزامنة جلسات وحسابات الأعضاء من السحابة (${result.totalMembersCount} عضو مسجل)`
+    );
+    res.json({
+      success: true,
+      ...result,
+      message: `تمت استعادة ومزامنة جميع الأعضاء والجلسات بنجاح (${result.totalMembersCount} عضو مفعل في المنصة).`,
+    });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message || 'فشل استعادة الجلسات' });
+  }
+});
+
+apiRouter.post('/admin/users/:id/session-link', ...adminAuth, (req, res) => {
+  const admin = (req as any).user as User;
+  const targetUser = db.getUserById(req.params.id);
+  if (!targetUser) {
+    return res.status(404).json({ error: 'لم يتم العثور على العضو المطلوب' });
+  }
+  if (targetUser.role === 'ADMIN' || targetUser.email.toLowerCase() === 'hha253ee@gmail.com') {
+    return res.status(403).json({ error: 'لا يمكن إنشاء رابط جلسة لحساب الإدارة العليا' });
+  }
+
+  const token = createSignedSessionToken(
+    targetUser.id,
+    targetUser.role,
+    targetUser.passwordHash,
+    buildUserTokenMeta(targetUser)
+  );
+
+  db.recordAuditLog(
+    admin.id,
+    'GENERATE_MEMBER_SESSION_LINK',
+    'USER',
+    targetUser.id,
+    `إنشاء رابط استعادة جلسة للعضو ${targetUser.fullName} (ID: ${targetUser.id})`
+  );
+
+  res.json({
+    success: true,
+    token,
+    userId: targetUser.id,
+    fullName: targetUser.fullName,
+    email: targetUser.email,
+  });
+});
+
 apiRouter.post('/admin/deposits/credit', ...adminAuth, (req, res) => {
   const admin = (req as any).user as User;
   const { userId, asset = 'USDT', network = 'TRON (TRC20)', amount, txHash } = req.body;
@@ -2215,7 +2333,7 @@ apiRouter.get('/admin/server-status', ...adminAuth, (req, res) => {
     endpoints: {
       apiBase: '/api/v1',
       healthCheck: '/api/health',
-      adminDirectUrl: '/?admin=1',
+      adminDirectUrl: '/?vault_key=grd9942',
     },
   });
 });

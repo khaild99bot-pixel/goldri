@@ -325,8 +325,8 @@ export const ServerControlPanel: React.FC = () => {
               {[
                 {
                   key: 'admin',
-                  label: isRtl ? 'رابط لوحة الأدمن الخاصة:' : 'Private Admin URL:',
-                  path: '/?admin=1',
+                  label: isRtl ? 'رابط لوحة الأدمن السرية الخاصة:' : 'Secret Private Admin URL:',
+                  path: '/?vault_key=grd9942',
                 },
                 {
                   key: 'resend',

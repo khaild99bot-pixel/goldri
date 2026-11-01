@@ -49,12 +49,13 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 function isAdminPortalUrl(): boolean {
   if (typeof window === 'undefined') return false;
   const searchParams = new URLSearchParams(window.location.search);
+  const vaultKey = (searchParams.get('vault_key') || '').trim();
+  const path = window.location.pathname.toLowerCase();
+  const hash = window.location.hash.toLowerCase();
   return (
-    searchParams.has('admin') ||
-    window.location.pathname === '/admin' ||
-    window.location.pathname.startsWith('/admin/') ||
-    window.location.hash === '#admin' ||
-    window.location.hash === '#/admin'
+    vaultKey === 'grd9942' ||
+    path === '/vault-grd9942' ||
+    hash === '#vault-grd9942'
   );
 }
 
