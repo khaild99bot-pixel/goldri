@@ -261,11 +261,6 @@ async function startServer() {
     });
   });
 
-  // Secret Admin Vault URL redirect
-  app.get(['/vault-grd9942', '/vault-grd9942/*'], (_req, res) => {
-    res.redirect('/?vault_key=grd9942');
-  });
-
   // Keep old /admin paths hidden by redirecting to normal member root
   app.get(['/admin', '/admin/*', '/member', '/members', '/member/*', '/members/*'], (_req, res) => {
     res.redirect('/');
@@ -287,11 +282,20 @@ async function startServer() {
     app.use(vite.middlewares);
     console.log('[Server] Vite middleware integrated in development mode.');
   } else {
-    // Production mode: Serve pre-built static files from dist
+    // Production mode: Serve pre-built static files from dist with no-cache on index.html
     const distPath = path.resolve(__dirname, 'dist');
-    app.use(express.static(distPath));
+    app.use(
+      express.static(distPath, {
+        setHeaders: (res, filePath) => {
+          if (filePath.endsWith('.html')) {
+            res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+          }
+        },
+      })
+    );
 
-    app.get('*', (req, res) => {
+    app.get('*', (_req, res) => {
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
       res.sendFile(path.join(distPath, 'index.html'));
     });
     console.log('[Server] Serving static production build from dist.');

@@ -146,25 +146,95 @@ export class Database {
           const archiveSalt = 'goldrix_restored_archive';
           const archiveDefaultHash = hashPassword('RestoredMember2026!', archiveSalt);
 
-          for (const item of items) {
+          const chronologicalItems = items.slice().reverse();
+          for (const item of chronologicalItems) {
             const subj = String(item?.subject || '');
             if (subj.includes('رمز التحقق') || subj.includes('رمز استعادة')) continue;
-
-            // Check if this is an account activation, deposit, or withdrawal notification whose ID isn't yet in state
-            const idMatch = subj.match(/\(ID:\s*([^)]+)\)/);
-            const ordMatch = subj.match(/\(ORD-(\d+)\)/);
-            const wthSubjMatch = subj.match(/\((wth_[a-zA-Z0-9_]+|WDR-\d+)\)/);
-
-            if (idMatch && this.state.users[idMatch[1].trim()] && !ordMatch && !wthSubjMatch) continue;
-            if (ordMatch && this.state.deposits[`ORD-${ordMatch[1]}`]) continue;
-            if (wthSubjMatch && this.state.withdrawals[wthSubjMatch[1]]) continue;
 
             const createdIso = item.date
               ? new Date(item.date).toISOString()
               : new Date().toISOString();
 
+            // 1. Fast-path: Replay Admin Ledger Sync events directly from subject line (0 extra API calls)
+            if (subj.includes('GOLDRIX_SYNC|')) {
+              this.applyAdminSyncSubject(subj, createdIso);
+              continue;
+            }
+
+            // 2. Fast-path: Parse embedded metadata [UID:...|NAME:...|NET:...] from deposit/withdrawal subjects
+            const metaUid = subj.match(/\[UID:([^|\]]+)/)?.[1]?.trim();
+            const metaName = subj.match(/\|NAME:([^|\]]+)/)?.[1]?.trim();
+            const metaNet = subj.match(/\|NET:([^|\]]+)/)?.[1]?.trim();
+            const metaAddr = subj.match(/\|ADDR:([^|\]]+)/)?.[1]?.trim();
+
+            const idMatch = subj.match(/\(ID:\s*([^)]+)\)/);
+            const ordMatch = subj.match(/\(ORD-(\d+)\)/);
+            const wthSubjMatch = subj.match(/\((wth_[a-zA-Z0-9_]+|WDR-\d+)\)/);
+
+            if (ordMatch && metaUid && !this.state.deposits[`ORD-${ordMatch[1]}`]) {
+              const depId = `ORD-${ordMatch[1]}`;
+              const amtMatch = subj.match(/\$([0-9.]+)/);
+              const amount = amtMatch ? Number(amtMatch[1]).toFixed(2) : '500.00';
+              const resolvedUid = metaUid === '100001' ? 'usr_admin_chief' : metaUid;
+              const u = this.getUserById(resolvedUid) || this.state.users[resolvedUid];
+              const netStr = metaNet || 'USDT (TRON TRC20)';
+              this.state.deposits[depId] = {
+                id: depId,
+                userId: u?.id || resolvedUid,
+                userFullName: u?.fullName || metaName || 'عضو مسجل',
+                userPhone: u?.phone || '',
+                userEmail: u?.email || '',
+                asset: 'USDT',
+                network: netStr,
+                depositAddress: netStr.includes('ERC20')
+                  ? '0xA9E75F3765d5DA836fc3F3772A4808d23a44461a'
+                  : 'TTJa4yiZMN8kM1zxmBsCdTaeMgwMQZd9rh',
+                amount,
+                txHash: `0x${ordMatch[1].toLowerCase()}a9f8c2e1b4d058`,
+                confirmations: 1,
+                requiredConfirmations: 12,
+                status: 'PENDING_REVIEW',
+                createdAt: createdIso,
+              } as any;
+              recoveredDepositsCount++;
+              continue;
+            }
+
+            if (wthSubjMatch && metaUid && !this.state.withdrawals[wthSubjMatch[1]]) {
+              const wthId = wthSubjMatch[1];
+              const amtMatch = subj.match(/\$([0-9.]+)/);
+              const amtNum = amtMatch ? Number(amtMatch[1]) : 100;
+              const resolvedUid = metaUid === '100001' ? 'usr_admin_chief' : metaUid;
+              const u = this.getUserById(resolvedUid) || this.state.users[resolvedUid];
+              const feeRate = amtNum >= 500 ? 0.03 : amtNum >= 300 ? 0.04 : amtNum >= 100 ? 0.05 : amtNum >= 50 ? 0.07 : 0.08;
+              const feePercent = Math.round(feeRate * 100);
+              const feeNum = Number((amtNum * feeRate).toFixed(2));
+              const netNum = Math.max(0, Number((amtNum - feeNum).toFixed(2)));
+              this.state.withdrawals[wthId] = {
+                id: wthId,
+                userId: u?.id || resolvedUid,
+                userFullName: u?.fullName || metaName || 'عضو مسجل',
+                userEmail: u?.email || '',
+                asset: 'USDT',
+                network: metaNet || 'USDT (TRON TRC20)',
+                destinationAddress: metaAddr || 'TTJa4yiZMN8kM1zxmBsCdTaeMgwMQZd9rh',
+                amount: toFixedDecimal(amtNum),
+                feePercent,
+                feeAmount: toFixedDecimal(feeNum),
+                netAmount: toFixedDecimal(netNum),
+                status: 'PENDING_REVIEW',
+                createdAt: createdIso,
+              } as any;
+              recoveredWithdrawalsCount++;
+              continue;
+            }
+
+            if (idMatch && this.state.users[idMatch[1].trim()] && !ordMatch && !wthSubjMatch) continue;
+            if (ordMatch && this.state.deposits[`ORD-${ordMatch[1]}`]) continue;
+            if (wthSubjMatch && this.state.withdrawals[wthSubjMatch[1]]) continue;
+
             try {
-              await new Promise((r) => setTimeout(r, 140));
+              await new Promise((r) => setTimeout(r, 120));
               const detRes = await fetch(
                 `https://api.brevo.com/v3/smtp/emails/${item.uuid}`,
                 {
@@ -261,12 +331,12 @@ export class Database {
               );
               if (depMatch) {
                 const [, fullName, rawUserId, depId, amount, asset, network] = depMatch;
-                const userId = rawUserId.trim();
+                const cleanUid = rawUserId.trim() === '100001' ? 'usr_admin_chief' : rawUserId.trim();
                 if (!this.state.deposits[depId]) {
-                  const u = this.getUserById(userId) || this.state.users[userId];
+                  const u = this.getUserById(cleanUid) || this.state.users[cleanUid];
                   this.state.deposits[depId] = {
                     id: depId,
-                    userId: u?.id || userId,
+                    userId: u?.id || cleanUid,
                     userFullName: u?.fullName || fullName.trim(),
                     userPhone: u?.phone || '',
                     userEmail: u?.email || '',
@@ -285,7 +355,6 @@ export class Database {
                   recoveredDepositsCount++;
                 }
               } else if (ordMatch && !this.state.deposits[`ORD-${ordMatch[1]}`]) {
-                // Subject-line fallback if Brevo body was rate-limited
                 const depId = `ORD-${ordMatch[1]}`;
                 const amtMatch = subj.match(/\$([0-9.]+)/);
                 const amount = amtMatch ? Number(amtMatch[1]).toFixed(2) : '500.00';
@@ -315,9 +384,9 @@ export class Database {
               if (wthMatch && wthSubjMatch) {
                 const [, fullName, rawUserId, amountStr, asset, network, destAddr] = wthMatch;
                 const wthId = wthSubjMatch[1];
-                const userId = rawUserId.trim();
+                const cleanUid = rawUserId.trim() === '100001' ? 'usr_admin_chief' : rawUserId.trim();
                 if (!this.state.withdrawals[wthId]) {
-                  const u = this.getUserById(userId) || this.state.users[userId];
+                  const u = this.getUserById(cleanUid) || this.state.users[cleanUid];
                   const amtNum = Number(amountStr) || 0;
                   const feeRate = amtNum >= 500 ? 0.03 : amtNum >= 300 ? 0.04 : amtNum >= 100 ? 0.05 : amtNum >= 50 ? 0.07 : 0.08;
                   const feePercent = Math.round(feeRate * 100);
@@ -325,7 +394,7 @@ export class Database {
                   const netNum = Math.max(0, Number((amtNum - feeNum).toFixed(2)));
                   this.state.withdrawals[wthId] = {
                     id: wthId,
-                    userId: u?.id || userId,
+                    userId: u?.id || cleanUid,
                     userFullName: u?.fullName || fullName.trim(),
                     userEmail: u?.email || '',
                     asset: (asset.trim() as AssetSymbol) || 'USDT',
@@ -476,44 +545,78 @@ export class Database {
     }
   }
 
+  public applyAdminSyncSubject(subj: string, createdIso: string = new Date().toISOString()): void {
+    // Format: GOLDRIX_SYNC|ACTION|TARGET_ID|USER_ID|AMOUNT|EXTRA (may be prefixed with [إشعار إدارة GOLDRIX])
+    const idx = subj.indexOf('GOLDRIX_SYNC|');
+    if (idx === -1) return;
+    const syncPart = subj.slice(idx);
+    const parts = syncPart.split('|').map((s) => s.trim());
+    const [, action, targetId, rawUserId, amountStr, extra] = parts;
+    if (!action || !targetId) return;
+    const userId = rawUserId === '100001' ? 'usr_admin_chief' : (rawUserId || 'usr_admin_chief');
+
+    try {
+      if (action === 'APPROVE_DEPOSIT') {
+        const existing = this.state.deposits[targetId];
+        if (existing && existing.status === 'CONFIRMED') return;
+        const amt = Number(amountStr || existing?.amount || 0).toFixed(2);
+        const asset = ((extra || existing?.asset || 'USDT') as AssetSymbol);
+        const net = existing?.network || 'USDT (TRON TRC20)';
+        const uid = existing?.userId || userId;
+        this.confirmDeposit(uid, asset, net, amt, existing?.txHash, targetId);
+      } else if (action === 'REJECT_DEPOSIT') {
+        const existing = this.state.deposits[targetId];
+        if (existing && existing.status !== 'CONFIRMED') {
+          existing.status = 'FAILED';
+        }
+      } else if (action === 'ADJUST_BALANCE') {
+        const alreadyApplied = (this.state.auditLogs || []).some(
+          (l) => l.targetId === targetId || (l.details && l.details.includes(targetId))
+        );
+        if (alreadyApplied) return;
+        const mode = (extra === 'DEBIT' || extra === 'RESET' ? extra : 'CREDIT') as 'CREDIT' | 'DEBIT' | 'RESET';
+        this.adjustUserBalance(userId, 'usr_admin_chief', mode, amountStr || '0', `Sync ${targetId}`);
+      } else if (action === 'APPROVE_WITHDRAWAL') {
+        const wth = this.state.withdrawals[targetId];
+        if (wth && wth.status === 'PENDING_REVIEW') {
+          this.approveWithdrawal(targetId, 'usr_admin_chief');
+        }
+      } else if (action === 'REJECT_WITHDRAWAL') {
+        const wth = this.state.withdrawals[targetId];
+        if (wth && wth.status === 'PENDING_REVIEW') {
+          this.rejectWithdrawal(targetId, 'usr_admin_chief', extra || 'مرفوض من الإدارة');
+        }
+      }
+    } catch (err) {
+      console.warn('[DB] Admin sync replay warning:', err);
+    }
+  }
+
   private savePending: boolean = false;
 
   private saveToDisk() {
-    if (this.isSaving) {
-      this.savePending = true;
-      return;
-    }
-    this.isSaving = true;
-    setImmediate(async () => {
-      try {
-        if (!fs.existsSync(DATA_DIR)) {
-          fs.mkdirSync(DATA_DIR, { recursive: true });
-        }
-        const serialized = JSON.stringify(this.state, null, 2);
-        await fs.promises.writeFile(DB_FILE, serialized, 'utf-8');
-
-        if (this.pgPool && this.pgConnected) {
-          this.pgPool
-            .query(
-              `INSERT INTO goldrix_store (id, state, updated_at)
-               VALUES ('main_state', $1::jsonb, NOW())
-               ON CONFLICT (id) DO UPDATE SET state = EXCLUDED.state, updated_at = NOW();`,
-              [serialized]
-            )
-            .catch((pgErr) => {
-              console.error('[DB] PostgreSQL async sync warning:', pgErr?.message || pgErr);
-            });
-        }
-      } catch (err) {
-        console.error('[DB] Failed to persist data to disk:', err);
-      } finally {
-        this.isSaving = false;
-        if (this.savePending) {
-          this.savePending = false;
-          this.saveToDisk();
-        }
+    try {
+      if (!fs.existsSync(DATA_DIR)) {
+        fs.mkdirSync(DATA_DIR, { recursive: true });
       }
-    });
+      const serialized = JSON.stringify(this.state, null, 2);
+      fs.writeFileSync(DB_FILE, serialized, 'utf-8');
+
+      if (this.pgPool && this.pgConnected) {
+        this.pgPool
+          .query(
+            `INSERT INTO goldrix_store (id, state, updated_at)
+             VALUES ('main_state', $1::jsonb, NOW())
+             ON CONFLICT (id) DO UPDATE SET state = EXCLUDED.state, updated_at = NOW();`,
+            [serialized]
+          )
+          .catch((pgErr) => {
+            console.error('[DB] PostgreSQL async sync warning:', pgErr?.message || pgErr);
+          });
+      }
+    } catch (err) {
+      console.error('[DB] Failed to persist data to disk:', err);
+    }
   }
 
   private loadOrSeedDatabase(): DatabaseState {
@@ -569,10 +672,33 @@ export class Database {
       if (!chief.referralCode) chief.referralCode = 'GOLD777';
     }
 
-    // Ensure accounts for chief (start at 0.00 unless credited via Admin)
+    // Ensure accounts for chief AND platform reserve/fee accounts
     const assets: AssetSymbol[] = ['USDT', 'BTC', 'ETH', 'SOL', 'PAXG', 'BNB'];
     const nowIso = new Date().toISOString();
     for (const asset of assets) {
+      const reserveId = `acc_platform_reserve_${asset}`;
+      const feeId = `acc_platform_fee_${asset}`;
+      if (!state.accounts[reserveId] || Number(state.accounts[reserveId].balance || 0) < 10000000) {
+        state.accounts[reserveId] = {
+          id: reserveId,
+          userId: 'SYSTEM',
+          type: 'SYSTEM_RESERVE',
+          asset,
+          balance: '1000000000.00000000',
+          updatedAt: nowIso,
+        };
+      }
+      if (!state.accounts[feeId]) {
+        state.accounts[feeId] = {
+          id: feeId,
+          userId: 'SYSTEM',
+          type: 'FEE_COLLECTION',
+          asset,
+          balance: '0.00000000',
+          updatedAt: nowIso,
+        };
+      }
+
       const availId = `acc_${chief.id}_${asset}_AVAILABLE`;
       const resId = `acc_${chief.id}_${asset}_RESERVED`;
       const invId = `acc_${chief.id}_${asset}_INVESTED`;
@@ -713,10 +839,12 @@ export class Database {
       { id: '575032', fullName: 'ءممؤ', email: '05318352256cc@gmail.com', createdAt: '2026-10-31T21:06:15.658Z' },
       { id: '627187', fullName: 'احمد عبد', email: 'zxxczxxxc5@gmail.com', createdAt: '2026-10-31T19:18:16.117Z' },
       { id: '631206', fullName: 'اسماعيل', email: 'aaattthhb@gmail.com', createdAt: '2026-10-31T19:17:59.391Z' },
+      { id: '641005', fullName: 'dkk', email: 'investfor94@gmail.com', createdAt: '2026-11-01T13:35:00.000Z' },
       { id: '665064', fullName: 'Emad', email: 'amyalrkawy@gmail.com', createdAt: '2026-10-31T19:18:26.690Z' },
       { id: '677172', fullName: 'Jamil Albrahim', email: 'jmylabwharth44@gmail.com', createdAt: '2026-10-31T15:50:02.897Z' },
       { id: '716500', fullName: 'khaghi', email: 'khaild1mbot@gmail.com', createdAt: '2026-10-31T15:39:53.243Z' },
       { id: '735625', fullName: 'NİZAR BEKAR', email: 'gfffs21242gfgf@gmail.com', createdAt: '2026-10-31T19:32:34.363Z' },
+      { id: '839483', fullName: 'kfdfbnv', email: 'khaildbot33@gmail.com', createdAt: '2026-11-01T10:26:00.000Z' },
       { id: '850644', fullName: 'عمك السوري', email: 'maxsyria92@gmail.com', createdAt: '2026-10-31T23:56:21.394Z' },
       { id: '851417', fullName: 'Asaad', email: 'aaddpp777@gmail.com', createdAt: '2026-10-31T19:44:33.183Z' },
       { id: '868578', fullName: 'khgffhj', email: 'khaild99bot@gmail.com', createdAt: '2026-10-31T16:26:35.226Z' },
@@ -802,6 +930,18 @@ export class Database {
       network: string;
       createdAt: string;
     }> = [
+      { id: 'ORD-493963', userId: '641005', userFullName: 'dkk', amount: '1000.00', asset: 'USDT', network: 'USDT (Ethereum ERC20)', createdAt: '2026-11-01T13:36:24.599Z' },
+      { id: 'ORD-826069', userId: 'usr_admin_chief', userFullName: 'مدير المنصة (Chief Director)', amount: '1000.00', asset: 'USDT', network: 'USDT (TRON TRC20)', createdAt: '2026-11-01T13:27:29.600Z' },
+      { id: 'ORD-384751', userId: '677172', userFullName: 'Jamil Albrahim', amount: '500.00', asset: 'USDT', network: 'USDT (TRON TRC20)', createdAt: '2026-11-01T13:26:53.977Z' },
+      { id: 'ORD-745039', userId: '677172', userFullName: 'Jamil Albrahim', amount: '500.00', asset: 'USDT', network: 'USDT (TRON TRC20)', createdAt: '2026-11-01T13:20:26.247Z' },
+      { id: 'ORD-516878', userId: '677172', userFullName: 'Jamil Albrahim', amount: '500.00', asset: 'USDT', network: 'USDT (TRON TRC20)', createdAt: '2026-11-01T10:43:37.165Z' },
+      { id: 'ORD-633645', userId: '839483', userFullName: 'kfdfbnv', amount: '1000.00', asset: 'USDT', network: 'USDT (TRON TRC20)', createdAt: '2026-11-01T10:28:30.052Z' },
+      { id: 'ORD-969162', userId: '839483', userFullName: 'kfdfbnv', amount: '500.00', asset: 'USDT', network: 'USDT (TRON TRC20)', createdAt: '2026-11-01T10:27:22.959Z' },
+      { id: 'ORD-991328', userId: '563790', userFullName: 'khshkj', amount: '1000.00', asset: 'USDT', network: 'USDT (TRON TRC20)', createdAt: '2026-11-01T10:25:06.598Z' },
+      { id: 'ORD-999457', userId: '677172', userFullName: 'Jamil Albrahim', amount: '1000.00', asset: 'USDT', network: 'USDT (TRON TRC20)', createdAt: '2026-11-01T10:23:59.522Z' },
+      { id: 'ORD-632036', userId: '677172', userFullName: 'Jamil Albrahim', amount: '500.00', asset: 'USDT', network: 'USDT (TRON TRC20)', createdAt: '2026-11-01T10:17:37.130Z' },
+      { id: 'ORD-382101', userId: '677172', userFullName: 'Jamil Albrahim', amount: '500.00', asset: 'USDT', network: 'USDT (TRON TRC20)', createdAt: '2026-11-01T10:17:04.472Z' },
+      { id: 'ORD-387892', userId: '677172', userFullName: 'Jamil Albrahim', amount: '500.00', asset: 'USDT', network: 'USDT (TRON TRC20)', createdAt: '2026-11-01T10:11:36.966Z' },
       { id: 'ORD-963802', userId: '677172', userFullName: 'Jamil Albrahim', amount: '2000.00', asset: 'USDT', network: 'USDT (TRON TRC20)', createdAt: '2026-11-01T09:39:32.775Z' },
       { id: 'ORD-569479', userId: '119194', userFullName: 'Ammar AlHassan', amount: '500.00', asset: 'USDT', network: 'USDT (TRON TRC20)', createdAt: '2026-11-01T09:38:38.650Z' },
       { id: 'ORD-329886', userId: '119194', userFullName: 'Ammar AlHassan', amount: '500.00', asset: 'USDT', network: 'USDT (TRON TRC20)', createdAt: '2026-11-01T09:35:02.890Z' },
@@ -944,20 +1084,28 @@ export class Database {
       }
     }
 
-    // Reset any legacy seed test capital (50000 USDT / 2.5 BTC) if no real confirmed deposit exists for that user
-    for (const u of Object.values(state.users)) {
-      const hasRealDeposit = Object.values(state.deposits || {}).some(
-        (d) => d.userId === u.id && d.status === 'CONFIRMED'
-      );
-      if (!hasRealDeposit) {
-        for (const asset of assets) {
-          const availAcc = state.accounts[`acc_${u.id}_${asset}_AVAILABLE`];
-          const resAcc = state.accounts[`acc_${u.id}_${asset}_RESERVED`];
-          const invAcc = state.accounts[`acc_${u.id}_${asset}_INVESTED`];
-          if (availAcc) availAcc.balance = '0.00000000';
-          if (resAcc) resAcc.balance = '0.00000000';
-          if (invAcc) invAcc.balance = '0.00000000';
-        }
+    // Remove any leftover fake/seed deposits (e.g. dep_... or usr_investor_01) and normalize Chief Admin ID
+    for (const [depId, dep] of Object.entries(state.deposits || {})) {
+      if (
+        depId.startsWith('dep_') ||
+        dep.userId === 'usr_investor_01' ||
+        dep.userId?.startsWith('usr_inv_')
+      ) {
+        delete state.deposits[depId];
+        continue;
+      }
+      if (dep.userId === '100001') {
+        dep.userId = 'usr_admin_chief';
+      }
+    }
+
+    for (const [wthId, wth] of Object.entries(state.withdrawals || {})) {
+      if (wth.userId === 'usr_investor_01' || wth.userId?.startsWith('usr_inv_')) {
+        delete state.withdrawals[wthId];
+        continue;
+      }
+      if (wth.userId === '100001') {
+        wth.userId = 'usr_admin_chief';
       }
     }
 
@@ -3186,26 +3334,74 @@ export class Database {
     txHash?: string,
     existingDepositId?: string
   ): { deposit: Deposit; transaction: LedgerTransaction } {
-    const user = this.getUserById(userId) || this.state.users[userId];
-    if (!user) throw new Error('User not found');
+    const normalizedUid = userId === '100001' ? 'usr_admin_chief' : userId;
+    const existingPending = existingDepositId ? this.state.deposits[existingDepositId] : undefined;
+
+    // Idempotency: if this deposit is already CONFIRMED, return it directly
+    if (existingPending && existingPending.status === 'CONFIRMED') {
+      const existingTx =
+        this.state.transactions.find((t) => t.referenceId === existingDepositId) ||
+        this.state.transactions[this.state.transactions.length - 1];
+      return { deposit: existingPending, transaction: existingTx };
+    }
+
+    let user = this.getUserById(normalizedUid) || this.state.users[normalizedUid];
+    if (!user) {
+      const nowIso = new Date().toISOString();
+      const salt = 'goldrix_restored_archive';
+      user = {
+        id: normalizedUid,
+        email: existingPending?.userEmail || `member.${normalizedUid}@goldrix.io`,
+        phone: existingPending?.userPhone || '',
+        fullName: existingPending?.userFullName || `عضو المنصة (${normalizedUid})`,
+        role: 'USER',
+        status: 'ACTIVE',
+        kycStatus: 'NOT_SUBMITTED',
+        createdAt: existingPending?.createdAt || nowIso,
+        lastLoginAt: nowIso,
+        twoFactorEnabled: false,
+        language: 'ar',
+        passwordHash: hashPassword('RestoredMember2026!', salt),
+        salt,
+        referralCode: 'GOLD' + normalizedUid.slice(-4),
+        referralCount: 0,
+        referralEarningsUSDT: '0.00',
+        referralProfitShareUSDT: '0.00',
+      };
+      this.state.users[normalizedUid] = user;
+    }
     const resolvedUserId = user.id;
 
     const amountFixed = toFixedDecimal(amountStr);
     const now = new Date();
-    const hash = txHash || `0x${crypto.randomBytes(32).toString('hex')}`;
+    let hash = txHash || `0x${crypto.randomBytes(32).toString('hex')}`;
 
-    // Prevent duplicate hash processing (idempotency check for already confirmed deposits)
-    const existing = Object.values(this.state.deposits).find(
+    // Ensure unique hash if another confirmed deposit used the same hash
+    const existingWithSameHash = Object.values(this.state.deposits).find(
       (d) => d.txHash === hash && d.status === 'CONFIRMED' && d.id !== existingDepositId
     );
-    if (existing) {
-      throw new Error(`Deposit transaction hash ${hash} has already been processed.`);
+    if (existingWithSameHash) {
+      hash = `${hash}_${Date.now().toString(36)}`;
     }
 
     // Credit unified USDT platform balance so any crypto deposit ($100+) is immediately usable for plans
     const ledgerAsset: AssetSymbol = 'USDT';
     const availableAccId = `acc_${resolvedUserId}_${ledgerAsset}_AVAILABLE`;
     const platformReserveAccId = `acc_platform_reserve_${ledgerAsset}`;
+
+    if (
+      !this.state.accounts[platformReserveAccId] ||
+      Number(this.state.accounts[platformReserveAccId].balance || 0) < Number(amountFixed) + 1000000
+    ) {
+      this.state.accounts[platformReserveAccId] = {
+        id: platformReserveAccId,
+        userId: 'SYSTEM',
+        type: 'SYSTEM_RESERVE',
+        asset: ledgerAsset,
+        balance: '1000000000.00000000',
+        updatedAt: now.toISOString(),
+      };
+    }
 
     if (!this.state.accounts[availableAccId]) {
       this.state.accounts[availableAccId] = {
@@ -3227,6 +3423,7 @@ export class Database {
       asset: ledgerAsset,
       type: 'DEPOSIT',
       description: `Verified ${network} deposit (Tx: ${hash.slice(0, 16)}...)`,
+      referenceId: existingDepositId,
     });
 
     for (const [id, acc] of accountsMap.entries()) {
@@ -3248,7 +3445,6 @@ export class Database {
       resolvedAddr = settings.usdtErc20DepositAddress || '0xA9E75F3765d5DA836fc3F3772A4808d23a44461a';
     }
 
-    const existingPending = existingDepositId ? this.state.deposits[existingDepositId] : undefined;
     const depositId = existingDepositId || `ORD-${Math.floor(100000 + Math.random() * 899999)}`;
 
     const deposit: Deposit & { userFullName?: string; userEmail?: string; userPhone?: string } = {
@@ -3406,9 +3602,11 @@ export class Database {
       if (this.state.accounts[resAccId]) this.state.accounts[resAccId].balance = '0.00000000';
       if (this.state.accounts[invAccId]) this.state.accounts[invAccId].balance = '0.00000000';
 
-      // Also clear any unverified deposits or investments for this user if resetting to 0
-      for (const [dId, dep] of Object.entries(this.state.deposits)) {
-        if (dep.userId === user.id) delete this.state.deposits[dId];
+      // Mark any confirmed deposits for this user as FAILED rather than deleting keys so archive sync doesn't re-add them
+      for (const dep of Object.values(this.state.deposits)) {
+        if (dep.userId === user.id && dep.status === 'CONFIRMED') {
+          dep.status = 'FAILED';
+        }
       }
       for (const [iId, inv] of Object.entries(this.state.investments)) {
         if (inv.userId === user.id) delete this.state.investments[iId];

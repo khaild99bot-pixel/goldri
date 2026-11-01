@@ -402,15 +402,44 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ setCurrentTab, i
   const handleApproveDeposit = async (id: string) => {
     setIsProcessing(true);
     setFeedback(null);
+    const targetDep = deposits.find((d) => d.id === id);
     try {
-      await api.approveAdminDeposit(id);
+      const res = await api.approveAdminDeposit(id, {
+        userId: targetDep?.userId,
+        amount: targetDep?.amount,
+        asset: targetDep?.asset,
+        network: targetDep?.network,
+        userFullName: targetDep?.userFullName,
+        userEmail: targetDep?.userEmail,
+        userPhone: targetDep?.userPhone,
+      });
       setConfirmingDeposit(null);
+      setDeposits((prev) =>
+        prev.map((d) => (d.id === id ? { ...d, status: 'CONFIRMED' } : d))
+      );
+      if (targetDep?.userId) {
+        const targetUid = targetDep.userId === '100001' ? 'usr_admin_chief' : targetDep.userId;
+        setUsersList((prev) =>
+          prev.map((u) =>
+            u.id === targetUid
+              ? {
+                  ...u,
+                  balanceUSDT:
+                    res?.newBalanceUSDT ||
+                    (Number(u.balanceUSDT || 0) + Number(targetDep.amount || 0)).toFixed(2),
+                }
+              : u
+          )
+        );
+      }
       setFeedback(
         isRtl
-          ? 'تمت الموافقة المؤكدة على الإيداع وإضافة الرصيد الحقيقي إلى محفظة العضو بنجاح!'
-          : 'Deposit approved! Funds credited to user balance.'
+          ? `تمت الموافقة المؤكدة على الطلب (${id}) وإضافة +$${targetDep?.amount || ''} USDT إلى رصيد العضو بنجاح!${
+              res?.newBalanceUSDT ? ` (الرصيد المتاح الجديد: $${res.newBalanceUSDT} USDT)` : ''
+            }`
+          : `Deposit ${id} approved! Funds credited to user balance.`
       );
-      await loadAllAdminData();
+      await loadAllAdminData(false);
       await refreshBalances();
     } catch (err: any) {
       setFeedback(`Error: ${err.message}`);
@@ -425,12 +454,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ setCurrentTab, i
     try {
       await api.rejectAdminDeposit(id, 'طلب إيداع غير مؤكد / مرفوض من الإدارة');
       setConfirmingDeposit(null);
+      setDeposits((prev) =>
+        prev.map((d) => (d.id === id ? { ...d, status: 'FAILED' } : d))
+      );
       setFeedback(
         isRtl
-          ? 'تم رفض وحذف طلب الإيداع غير المؤكد (لم يتم إضافة أي رصيد للعضو).'
-          : 'Unverified deposit rejected and removed.'
+          ? 'تم رفض طلب الإيداع غير المؤكد (لم يتم إضافة أي رصيد للعضو).'
+          : 'Unverified deposit rejected.'
       );
-      await loadAllAdminData();
+      await loadAllAdminData(false);
     } catch (err: any) {
       setFeedback(`Error: ${err.message}`);
     } finally {
@@ -453,16 +485,30 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ setCurrentTab, i
     setFeedback(null);
     try {
       if (balanceAdjustMode === 'CREDIT') {
-        await api.creditAdminDeposit({
+        const res = await api.creditAdminDeposit({
           userId: creditUserId,
           asset: creditAsset,
           network: creditNetwork,
           amount: creditAmount,
           txHash: creditTxHash || undefined,
         });
+        setUsersList((prev) =>
+          prev.map((u) =>
+            u.id === creditUserId
+              ? {
+                  ...u,
+                  balanceUSDT:
+                    res?.newBalanceUSDT ||
+                    (Number(u.balanceUSDT || 0) + Number(creditAmount || 0)).toFixed(2),
+                }
+              : u
+          )
+        );
         setFeedback(
           isRtl
-            ? `تم تأكيد وإضافة رصيد $${Number(creditAmount).toFixed(2)} ${creditAsset} إلى حساب العميل (ID: ${formatClientId(creditUserId)}) بنجاح!`
+            ? `تم تأكيد وإضافة رصيد $${Number(creditAmount).toFixed(2)} ${creditAsset} إلى حساب العميل (ID: ${formatClientId(creditUserId)}) بنجاح!${
+                res?.newBalanceUSDT ? ` (الرصيد الجديد: $${res.newBalanceUSDT} USDT)` : ''
+              }`
             : `Successfully credited ${creditAmount} ${creditAsset} to Client ID ${formatClientId(creditUserId)}.`
         );
       } else {
@@ -474,6 +520,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ setCurrentTab, i
               ? 'تصفير رصيد الحساب من قبل الإدارة'
               : 'خصم وتصحيح رصيد من قبل الإدارة',
         });
+        setUsersList((prev) =>
+          prev.map((u) =>
+            u.id === creditUserId
+              ? { ...u, balanceUSDT: res?.newBalanceUSDT ?? '0.00' }
+              : u
+          )
+        );
         setFeedback(
           isRtl
             ? balanceAdjustMode === 'RESET'
@@ -486,7 +539,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ setCurrentTab, i
       setConfirmBalanceStep(false);
       setCreditAmount('');
       setCreditTxHash('');
-      await loadAllAdminData();
+      await loadAllAdminData(false);
       await refreshBalances();
     } catch (err: any) {
       setFeedback(`Error: ${err.message}`);
@@ -645,19 +698,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ setCurrentTab, i
     try {
       const res = await api.adminRecoverMemberSessions();
       await loadAllAdminData(false);
-      setFeedback({
-        type: 'success',
-        message:
-          res.message ||
+      setFeedback(
+        res.message ||
           (isRtl
-            ? `تمت استعادة ومزامنة جميع الأعضاءوطلبات الإيداع والسحب بنجاح (${res.totalMembersCount} عضو).`
-            : `Successfully recovered & synced member sessions (${res.totalMembersCount} members).`),
-      });
+            ? `تمت استعادة ومزامنة جميع الأعضاء وطلبات الإيداع والسحب بنجاح (${res.totalMembersCount} عضو).`
+            : `Successfully recovered & synced member sessions (${res.totalMembersCount} members).`)
+      );
     } catch (err: any) {
-      setFeedback({
-        type: 'error',
-        message: err?.message || (isRtl ? 'تعذرت مزامنة الجلسات' : 'Failed to sync sessions'),
-      });
+      setFeedback(
+        `Error: ${err?.message || (isRtl ? 'تعذرت مزامنة الجلسات' : 'Failed to sync sessions')}`
+      );
     } finally {
       setIsRecoveringSessions(false);
     }
@@ -670,17 +720,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ setCurrentTab, i
       await navigator.clipboard.writeText(restoreUrl);
       setCopiedSessionUserId(targetUser.id);
       setTimeout(() => setCopiedSessionUserId(null), 3000);
-      setFeedback({
-        type: 'success',
-        message: isRtl
+      setFeedback(
+        isRtl
           ? `تم نسخ رابط استعادة الجلسة الفوري للعضو ${targetUser.fullName} (ID: ${formatClientId(targetUser.id)})`
-          : `Copied direct session restore link for ${targetUser.fullName}`,
-      });
+          : `Copied direct session restore link for ${targetUser.fullName}`
+      );
     } catch (err: any) {
-      setFeedback({
-        type: 'error',
-        message: err?.message || (isRtl ? 'فشل إنشاء رابط الجلسة' : 'Failed to generate session link'),
-      });
+      setFeedback(
+        `Error: ${err?.message || (isRtl ? 'فشل إنشاء رابط الجلسة' : 'Failed to generate session link')}`
+      );
     }
   };
 
@@ -1194,7 +1242,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ setCurrentTab, i
 
       {feedback && (
         <div className="p-3.5 bg-emerald-500/10 border border-emerald-500/30 rounded-xl text-xs text-emerald-400 font-bold flex items-center justify-between">
-          <span>{feedback}</span>
+          <span>{typeof feedback === 'string' ? feedback : (feedback as any)?.message || ''}</span>
           <button type="button" onClick={() => setFeedback(null)} className="text-neutral-400 hover:text-white cursor-pointer">
             <XCircle className="w-4 h-4" />
           </button>
@@ -1387,9 +1435,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ setCurrentTab, i
                                   {isRtl ? 'رفض' : 'Reject'}
                                 </button>
                               </div>
-                            ) : (
+                            ) : d.status === 'CONFIRMED' ? (
                               <span className="px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 text-[11px] font-bold">
-                                {isRtl ? 'تمت الموافقة' : 'Confirmed'}
+                                {isRtl ? 'تمت الموافقة وإضافة الرصيد' : 'Confirmed'}
+                              </span>
+                            ) : (
+                              <span className="px-2 py-0.5 rounded bg-rose-500/10 text-rose-400 text-[11px] font-bold">
+                                {isRtl ? 'مرفوض' : 'Rejected'}
                               </span>
                             )}
                           </td>
@@ -2483,13 +2535,19 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ setCurrentTab, i
                               className={`text-[10px] px-2 py-0.5 rounded font-bold uppercase ${
                                 d.status === 'CONFIRMED'
                                   ? 'text-emerald-400 bg-emerald-500/10'
+                                  : d.status === 'FAILED'
+                                  ? 'text-rose-400 bg-rose-500/10'
                                   : 'text-amber-400 bg-amber-500/10'
                               }`}
                             >
                               {d.status === 'CONFIRMED'
                                 ? isRtl
-                                  ? 'تمت الإضافة'
+                                  ? 'تمت الإضافة للرصيد'
                                   : 'Confirmed'
+                                : d.status === 'FAILED'
+                                ? isRtl
+                                  ? 'مرفوض'
+                                  : 'Rejected'
                                 : isRtl
                                 ? 'بانتظار الموافقة'
                                 : 'Pending Approval'}
@@ -2498,48 +2556,30 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ setCurrentTab, i
                           <td className="py-3.5 px-4 text-right rtl:text-left font-sans">
                             {d.status === 'PENDING_REVIEW' ? (
                               <div className="flex items-center justify-end rtl:justify-start gap-1.5">
-                                {confirmingDeposit?.id === d.id ? (
-                                  <>
-                                    <button
-                                      type="button"
-                                      onClick={() => handleApproveDeposit(d.id)}
-                                      disabled={isProcessing}
-                                      className="px-3 py-1.5 bg-amber-400 hover:bg-amber-300 text-neutral-950 font-black rounded-lg text-xs cursor-pointer disabled:opacity-50"
-                                    >
-                                      {isRtl ? `تأكيد نهائي (+$${d.amount})` : `Confirm +$${d.amount}`}
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={() => setConfirmingDeposit(null)}
-                                      className="px-2.5 py-1.5 bg-neutral-800 text-neutral-300 rounded-lg text-xs cursor-pointer"
-                                    >
-                                      {isRtl ? 'تراجع' : 'Cancel'}
-                                    </button>
-                                  </>
-                                ) : (
-                                  <>
-                                    <button
-                                      type="button"
-                                      onClick={() => setConfirmingDeposit(d)}
-                                      disabled={isProcessing}
-                                      className="px-3 py-1.5 bg-emerald-500 hover:bg-emerald-400 text-neutral-950 font-black rounded-lg text-xs cursor-pointer disabled:opacity-50"
-                                    >
-                                      {isRtl ? 'موافقة' : 'Approve'}
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={() => handleRejectDeposit(d.id)}
-                                      disabled={isProcessing}
-                                      className="px-3 py-1.5 bg-rose-500/20 hover:bg-rose-500/30 text-rose-400 font-bold rounded-lg text-xs cursor-pointer disabled:opacity-50"
-                                    >
-                                      {isRtl ? 'رفض وحذف' : 'Reject'}
-                                    </button>
-                                  </>
-                                )}
+                                <button
+                                  type="button"
+                                  onClick={() => handleApproveDeposit(d.id)}
+                                  disabled={isProcessing}
+                                  className="px-3 py-1.5 bg-emerald-500 hover:bg-emerald-400 text-neutral-950 font-black rounded-lg text-xs cursor-pointer disabled:opacity-50"
+                                >
+                                  {isRtl ? `موافقة (+$${d.amount})` : `Approve +$${d.amount}`}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleRejectDeposit(d.id)}
+                                  disabled={isProcessing}
+                                  className="px-3 py-1.5 bg-rose-500/20 hover:bg-rose-500/30 text-rose-400 font-bold rounded-lg text-xs cursor-pointer disabled:opacity-50"
+                                >
+                                  {isRtl ? 'رفض' : 'Reject'}
+                                </button>
                               </div>
+                            ) : d.status === 'CONFIRMED' ? (
+                              <span className="text-[11px] text-emerald-400 font-bold">
+                                {isRtl ? 'تمت الموافقة' : 'Confirmed'}
+                              </span>
                             ) : (
-                              <span className="text-[11px] text-neutral-500 font-mono">
-                                {isRtl ? 'تمت الموافقة' : 'Settled'}
+                              <span className="text-[11px] text-rose-400 font-bold">
+                                {isRtl ? 'تم الرفض' : 'Rejected'}
                               </span>
                             )}
                           </td>

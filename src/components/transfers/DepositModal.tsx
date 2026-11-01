@@ -357,18 +357,23 @@ export const TransferHistoryPanel: React.FC<{
 
   useEffect(() => {
     let mounted = true;
-    setLoading(true);
-    Promise.all([
-      api.getDeposits().catch(() => [] as Deposit[]),
-      api.getWithdrawals().catch(() => [] as Withdrawal[]),
-    ]).then(([deps, wths]) => {
-      if (!mounted) return;
-      setDeposits(Array.isArray(deps) ? deps : []);
-      setWithdrawals(Array.isArray(wths) ? wths : []);
-      setLoading(false);
-    });
+    const fetchHistory = (showSpinner: boolean) => {
+      if (showSpinner) setLoading(true);
+      Promise.all([
+        api.getDeposits().catch(() => [] as Deposit[]),
+        api.getWithdrawals().catch(() => [] as Withdrawal[]),
+      ]).then(([deps, wths]) => {
+        if (!mounted) return;
+        setDeposits(Array.isArray(deps) ? deps : []);
+        setWithdrawals(Array.isArray(wths) ? wths : []);
+        setLoading(false);
+      });
+    };
+    fetchHistory(true);
+    const interval = setInterval(() => fetchHistory(false), 6000);
     return () => {
       mounted = false;
+      clearInterval(interval);
     };
   }, [refreshTrigger]);
 

@@ -189,9 +189,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   useEffect(() => {
     refreshUserData();
-    if (isAdminPortalUrl()) return;
 
-    const pollMs = user?.kycStatus === 'PENDING' ? 4000 : 10000;
+    const pollMs = user?.kycStatus === 'PENDING' ? 4000 : 8000;
     const interval = setInterval(() => {
       if (api.getToken() && document.visibilityState === 'visible') {
         refreshUserData();

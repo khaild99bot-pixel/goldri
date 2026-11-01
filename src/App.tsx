@@ -41,15 +41,25 @@ type AdminModuleType = 'overview' | 'server' | 'users' | 'kyc' | 'withdrawals' |
 function isAdminUrlRequested(): boolean {
   if (typeof window === 'undefined') return false;
   const searchParams = new URLSearchParams(window.location.search);
+  // If old exposed ?admin=1 is accessed, strip it immediately and stay on public member portal
+  if (searchParams.has('admin')) {
+    try {
+      window.history.replaceState({}, '', '/');
+    } catch {
+      // ignore
+    }
+    return false;
+  }
   if (searchParams.has('member') || searchParams.has('members') || searchParams.has('ref') || searchParams.has('register')) {
     return false;
   }
-  const vaultKey = (searchParams.get('vault_key') || '').trim();
+  const vaultKey = (searchParams.get('vault_key') || searchParams.get('secret_vault') || '').trim();
   const path = window.location.pathname.toLowerCase();
   const hash = window.location.hash.toLowerCase();
   return (
     vaultKey === 'grd9942' ||
     path === '/vault-grd9942' ||
+    path.startsWith('/vault-grd9942/') ||
     hash === '#vault-grd9942'
   );
 }
@@ -117,24 +127,6 @@ function MainApp() {
   useEffect(() => {
     if (user) {
       setAuthOpen(false);
-      // If the authenticated user is the Chief Admin (hha253ee@gmail.com), automatically enter the Secret Admin Console
-      // unless they explicitly switched to Member preview (?member=1)
-      const params = new URLSearchParams(window.location.search);
-      if (
-        user.role === 'ADMIN' &&
-        user.email?.toLowerCase() === 'hha253ee@gmail.com' &&
-        !params.has('member') &&
-        !params.has('members')
-      ) {
-        setIsAdminPortal(true);
-        if (params.get('vault_key') !== 'grd9942') {
-          try {
-            window.history.replaceState({}, '', '/?vault_key=grd9942');
-          } catch {
-            // ignore
-          }
-        }
-      }
     }
   }, [user]);
 

@@ -517,9 +517,21 @@ class ApiService {
     return this.request<any[]>('/admin/deposits');
   }
 
-  public approveAdminDeposit(id: string) {
+  public approveAdminDeposit(
+    id: string,
+    details?: {
+      userId?: string;
+      amount?: string | number;
+      asset?: string;
+      network?: string;
+      userFullName?: string;
+      userEmail?: string;
+      userPhone?: string;
+    }
+  ) {
     return this.request<any>(`/admin/deposits/${id}/approve`, {
       method: 'POST',
+      body: JSON.stringify(details || {}),
     });
   }
 
