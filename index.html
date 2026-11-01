@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="ar" translate="no" class="notranslate">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="google" content="notranslate" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <title>GOLDRIX - Digital Asset Investment & Smart Trading Platform</title>
+    <meta name="description" content="Production-grade digital asset investment and smart trading platform featuring double-entry ledger accounting, automated strategies, KYC verification, and real-time market data." />
+    <meta property="og:title" content="GOLDRIX - Digital Asset Investment & Smart Trading Platform" />
+    <meta property="og:description" content="Production-grade digital asset investment and smart trading platform featuring double-entry ledger accounting, automated strategies, KYC verification, and real-time market data." />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="theme-color" content="#06090F" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="GOLDRIX" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=Cairo:wght@400;600;700&display=swap" rel="stylesheet">
+    <script>
+      (function () {
+        // Capture PWA beforeinstallprompt immediately before React mounts so native App Icon install always works on first tap
+        window.__deferredPwaPrompt = null;
+        window.addEventListener('beforeinstallprompt', function (e) {
+          e.preventDefault();
+          window.__deferredPwaPrompt = e;
+          window.dispatchEvent(new CustomEvent('goldrix:pwa-prompt-ready'));
+        });
+        window.addEventListener('appinstalled', function () {
+          window.__deferredPwaPrompt = null;
+          window.dispatchEvent(new CustomEvent('goldrix:pwa-installed'));
+        });
+
+        // Prevent Vite HMR / ping WebSocket connection errors in preview environments where HMR WebSockets are disabled
+        var NativeWebSocket = window.WebSocket;
+        if (NativeWebSocket) {
+          var PatchedWebSocket = function (url, protocols) {
+            var protoStr = Array.isArray(protocols) ? protocols.join(',') : String(protocols || '');
+            var urlStr = String(url || '');
+            if (
+              protoStr.indexOf('vite-hmr') !== -1 ||
+              protoStr.indexOf('vite-ping') !== -1 ||
+              urlStr.indexOf('vite-hmr') !== -1
+            ) {
+              var dummy = {
+                url: urlStr,
+                readyState: 1,
+                protocol: protoStr,
+                extensions: '',
+                bufferedAmount: 0,
+                binaryType: 'blob',
+                onopen: null,
+                onerror: null,
+                onclose: null,
+                onmessage: null,
+                addEventListener: function () {},
+                removeEventListener: function () {},
+                dispatchEvent: function () { return true; },
+                send: function () {},
+                close: function () { this.readyState = 3; }
+              };
+              return dummy;
+            }
+            return protocols !== undefined
+              ? new NativeWebSocket(url, protocols)
+              : new NativeWebSocket(url);
+          };
+          PatchedWebSocket.prototype = NativeWebSocket.prototype;
+          PatchedWebSocket.CONNECTING = NativeWebSocket.CONNECTING;
+          PatchedWebSocket.OPEN = NativeWebSocket.OPEN;
+          PatchedWebSocket.CLOSING = NativeWebSocket.CLOSING;
+          PatchedWebSocket.CLOSED = NativeWebSocket.CLOSED;
+          window.WebSocket = PatchedWebSocket;
+        }
+
+        window.addEventListener('unhandledrejection', function (e) {
+          var msg = e && e.reason && (e.reason.message || String(e.reason));
+          if (typeof msg === 'string' && msg.indexOf('WebSocket closed without opened') !== -1) {
+            e.preventDefault();
+          }
+        });
+
+        // Prevent iOS Safari pinch-to-zoom gestures
+        document.addEventListener('gesturestart', function (e) { e.preventDefault(); }, { passive: false });
+        document.addEventListener('gesturechange', function (e) { e.preventDefault(); }, { passive: false });
+        document.addEventListener('gestureend', function (e) { e.preventDefault(); }, { passive: false });
+
+        // Prevent multi-touch pinch-to-zoom on Android/iOS
+        document.addEventListener('touchmove', function (e) {
+          if (e.touches && e.touches.length > 1) {
+            e.preventDefault();
+          }
+        }, { passive: false });
+
+        // Prevent rapid double-tap zoom on mobile
+        var lastTouchEnd = 0;
+        document.addEventListener('touchend', function (e) {
+          var now = Date.now();
+          if (now - lastTouchEnd <= 300) {
+            e.preventDefault();
+          }
+          lastTouchEnd = now;
+        }, { passive: false });
+
+        // Prevent Ctrl/Cmd + Mouse Wheel zoom on desktop
+        window.addEventListener('wheel', function (e) {
+          if (e.ctrlKey || e.metaKey) {
+            e.preventDefault();
+          }
+        }, { passive: false });
+
+        // Prevent Ctrl/Cmd + (+/-/= / 0) keyboard zoom on desktop
+        window.addEventListener('keydown', function (e) {
+          if ((e.ctrlKey || e.metaKey) && (e.key === '+' || e.key === '-' || e.key === '=' || e.key === '0')) {
+            e.preventDefault();
+          }
+        }, { passive: false });
+      })();
+    </script>
+  </head>
+  <body translate="no" class="notranslate bg-neutral-950 text-neutral-100 antialiased selection:bg-emerald-500/30 selection:text-emerald-300">
+    <div id="root" translate="no" class="notranslate"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

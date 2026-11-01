@@ -1,0 +1,156 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "GOLDRIX user account profile synchronized with Firebase Authentication and Firestore",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Authentication UID"
+        },
+        "goldrixId": {
+          "type": "string",
+          "description": "6-digit GOLDRIX Client ID"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "User email address"
+        },
+        "fullName": {
+          "type": "string",
+          "description": "User full name"
+        },
+        "phone": {
+          "type": "string",
+          "description": "Optional phone number"
+        },
+        "country": {
+          "type": "string",
+          "description": "User country"
+        },
+        "role": {
+          "type": "string",
+          "enum": ["USER", "ADMIN", "COMPLIANCE"],
+          "description": "Account role"
+        },
+        "kycStatus": {
+          "type": "string",
+          "description": "KYC verification status"
+        },
+        "resendNotifyEmail": {
+          "type": "string",
+          "description": "Linked email address for receiving Resend email notifications"
+        },
+        "totalEstimatedUSDT": {
+          "type": "string",
+          "description": "Total portfolio value in USDT"
+        },
+        "withdrawableUSDT": {
+          "type": "string",
+          "description": "Withdrawable balance in USDT"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO timestamp of last synchronization"
+        }
+      },
+      "required": ["uid", "goldrixId", "email", "fullName", "role", "kycStatus", "updatedAt"]
+    },
+    "EmailLog": {
+      "title": "EmailLog",
+      "description": "Resend email delivery and inbound message record for user account",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID"
+        },
+        "to": {
+          "type": "string",
+          "format": "email",
+          "description": "Recipient email address"
+        },
+        "from": {
+          "type": "string",
+          "description": "Sender email address"
+        },
+        "subject": {
+          "type": "string",
+          "description": "Email subject line"
+        },
+        "category": {
+          "type": "string",
+          "enum": ["OTP", "DEPOSIT", "WITHDRAWAL", "ACCOUNT", "SUPPORT", "TEST", "INBOUND"],
+          "description": "Message category"
+        },
+        "bodyPreview": {
+          "type": "string",
+          "description": "Plain text summary of the email"
+        },
+        "provider": {
+          "type": "string",
+          "description": "Delivery provider (e.g. RESEND_API)"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO timestamp when email was processed"
+        }
+      },
+      "required": ["uid", "to", "from", "subject", "category", "bodyPreview", "provider", "createdAt"]
+    },
+    "CloudAccountBackup": {
+      "title": "CloudAccountBackup",
+      "description": "Cloud Firestore backup of user balances, active investment plans, and ledger state",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID"
+        },
+        "goldrixId": {
+          "type": "string",
+          "description": "6-digit GOLDRIX Client ID"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Account email"
+        },
+        "snapshotJson": {
+          "type": "string",
+          "description": "Serialized JSON snapshot of portfolio balances, investments, and transactions"
+        },
+        "syncedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO timestamp of backup sync"
+        }
+      },
+      "required": ["uid", "goldrixId", "email", "snapshotJson", "syncedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": {
+        "$ref": "#/entities/UserProfile"
+      },
+      "description": "User profile documents keyed by Firebase Auth UID"
+    },
+    "/email_logs/{emailId}": {
+      "schema": {
+        "$ref": "#/entities/EmailLog"
+      },
+      "description": "Resend email notification logs for users and administrators"
+    },
+    "/cloud_backups/{userId}": {
+      "schema": {
+        "$ref": "#/entities/CloudAccountBackup"
+      },
+      "description": "Real-time cloud backups of user portfolio and account state keyed by Firebase Auth UID"
+    }
+  }
+}

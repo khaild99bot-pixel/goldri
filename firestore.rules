@@ -1,0 +1,176 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users
+    // Document ID: {userId} (Firebase Auth UID)
+    // Fields:
+    //   - uid: string (required, immutable)
+    //   - goldrixId: string (required, 1..32 chars)
+    //   - email: string (required, valid email format)
+    //   - fullName: string (required, 1..120 chars)
+    //   - phone: string (optional, <= 40 chars)
+    //   - country: string (optional, <= 80 chars)
+    //   - role: string (required, 'USER' | 'ADMIN' | 'COMPLIANCE')
+    //   - kycStatus: string (required, <= 40 chars)
+    //   - resendNotifyEmail: string (optional, <= 160 chars)
+    //   - totalEstimatedUSDT: string (optional, <= 40 chars)
+    //   - withdrawableUSDT: string (optional, <= 40 chars)
+    //   - updatedAt: string (required, ISO 8601 date-time)
+    //
+    // Collection: email_logs
+    // Document ID: {emailId}
+    // Fields:
+    //   - uid: string (required, immutable)
+    //   - to: string (required, valid email format)
+    //   - from: string (required, 1..160 chars)
+    //   - subject: string (required, 1..240 chars)
+    //   - category: string (required, 'OTP' | 'DEPOSIT' | 'WITHDRAWAL' | 'ACCOUNT' | 'SUPPORT' | 'TEST' | 'INBOUND')
+    //   - bodyPreview: string (required, 1..4000 chars)
+    //   - provider: string (required, 1..80 chars)
+    //   - createdAt: string (required, ISO 8601 date-time)
+    //
+    // Collection: cloud_backups
+    // Document ID: {userId} (Firebase Auth UID)
+    // Fields:
+    //   - uid: string (required, immutable)
+    //   - goldrixId: string (required, 1..32 chars)
+    //   - email: string (required, valid email format)
+    //   - snapshotJson: string (required, 2..200000 chars)
+    //   - syncedAt: string (required, ISO 8601 date-time)
+    //
+    // ===============================================================
+
+    // Helper Functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() &&
+        (
+          (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+           get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'ADMIN') ||
+          (request.auth.token.email == "hha253ee@gmail.com" && request.auth.token.email_verified == true)
+        );
+    }
+
+    function isValidEmail(email) {
+      return email is string &&
+        email.size() >= 3 &&
+        email.size() <= 160 &&
+        email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+    }
+
+    function isValidDateString(dateStr) {
+      return dateStr is string &&
+        dateStr.size() >= 10 &&
+        dateStr.size() <= 40 &&
+        dateStr.matches("^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}.*Z?$");
+    }
+
+    function isOptionalString(data, field, maxLen) {
+      return !(field in data) || (data[field] is string && data[field].size() <= maxLen);
+    }
+
+    function isValidUserProfile(data) {
+      return data.keys().hasAll(['uid', 'goldrixId', 'email', 'fullName', 'role', 'kycStatus', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'uid',
+          'goldrixId',
+          'email',
+          'fullName',
+          'phone',
+          'country',
+          'role',
+          'kycStatus',
+          'resendNotifyEmail',
+          'totalEstimatedUSDT',
+          'withdrawableUSDT',
+          'updatedAt'
+        ]) &&
+        data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 &&
+        data.goldrixId is string && data.goldrixId.size() >= 1 && data.goldrixId.size() <= 32 &&
+        isValidEmail(data.email) &&
+        data.fullName is string && data.fullName.size() >= 1 && data.fullName.size() <= 120 &&
+        data.role in ['USER', 'ADMIN', 'COMPLIANCE'] &&
+        data.kycStatus is string && data.kycStatus.size() >= 1 && data.kycStatus.size() <= 40 &&
+        isValidDateString(data.updatedAt) &&
+        isOptionalString(data, 'phone', 40) &&
+        isOptionalString(data, 'country', 80) &&
+        isOptionalString(data, 'resendNotifyEmail', 160) &&
+        isOptionalString(data, 'totalEstimatedUSDT', 40) &&
+        isOptionalString(data, 'withdrawableUSDT', 40);
+    }
+
+    function isValidEmailLog(data) {
+      return data.keys().hasAll(['uid', 'to', 'from', 'subject', 'category', 'bodyPreview', 'provider', 'createdAt']) &&
+        data.keys().hasOnly(['uid', 'to', 'from', 'subject', 'category', 'bodyPreview', 'provider', 'createdAt']) &&
+        data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 &&
+        isValidEmail(data.to) &&
+        data.from is string && data.from.size() >= 1 && data.from.size() <= 160 &&
+        data.subject is string && data.subject.size() >= 1 && data.subject.size() <= 240 &&
+        data.category in ['OTP', 'DEPOSIT', 'WITHDRAWAL', 'ACCOUNT', 'SUPPORT', 'TEST', 'INBOUND'] &&
+        data.bodyPreview is string && data.bodyPreview.size() >= 1 && data.bodyPreview.size() <= 4000 &&
+        data.provider is string && data.provider.size() >= 1 && data.provider.size() <= 80 &&
+        isValidDateString(data.createdAt);
+    }
+
+    function isValidCloudBackup(data) {
+      return data.keys().hasAll(['uid', 'goldrixId', 'email', 'snapshotJson', 'syncedAt']) &&
+        data.keys().hasOnly(['uid', 'goldrixId', 'email', 'snapshotJson', 'syncedAt']) &&
+        data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 &&
+        data.goldrixId is string && data.goldrixId.size() >= 1 && data.goldrixId.size() <= 32 &&
+        isValidEmail(data.email) &&
+        data.snapshotJson is string && data.snapshotJson.size() >= 2 && data.snapshotJson.size() <= 200000 &&
+        isValidDateString(data.syncedAt);
+    }
+
+    // Users Collection
+    match /users/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create: if isOwner(userId) &&
+        isValidUserProfile(request.resource.data) &&
+        request.resource.data.uid == userId &&
+        (request.resource.data.role == 'USER' || isAdmin());
+      allow update: if (isOwner(userId) || isAdmin()) &&
+        isValidUserProfile(request.resource.data) &&
+        request.resource.data.uid == resource.data.uid &&
+        (request.resource.data.role == resource.data.role || isAdmin());
+      allow delete: if isAdmin();
+    }
+
+    // Email Logs Collection (Resend Notifications & Verification Logs)
+    match /email_logs/{emailId} {
+      allow read: if isAuthenticated() && (resource.data.uid == request.auth.uid || isAdmin());
+      allow create: if isAuthenticated() &&
+        request.resource.data.uid == request.auth.uid &&
+        isValidEmailLog(request.resource.data);
+      allow update: if isAdmin() &&
+        request.resource.data.uid == resource.data.uid &&
+        isValidEmailLog(request.resource.data);
+      allow delete: if isAdmin();
+    }
+
+    // Cloud Backups Collection
+    match /cloud_backups/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create: if isOwner(userId) &&
+        request.resource.data.uid == userId &&
+        isValidCloudBackup(request.resource.data);
+      allow update: if (isOwner(userId) || isAdmin()) &&
+        request.resource.data.uid == resource.data.uid &&
+        isValidCloudBackup(request.resource.data);
+      allow delete: if isAdmin();
+    }
+  }
+}

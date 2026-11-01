@@ -1,0 +1,6 @@
+{
+  "name": "GOLDRIX - Digital Asset Investment & Smart Trading Platform",
+  "description": "Production-grade digital asset investment and smart trading platform featuring double-entry ledger accounting, automated strategies, KYC verification, and real-time market data.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

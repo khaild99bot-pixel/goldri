@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0B1522" />
+      <stop offset="50%" stop-color="#070B12" />
+      <stop offset="100%" stop-color="#0B1C17" />
+    </linearGradient>
+    <linearGradient id="goldGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#FDE047" />
+      <stop offset="100%" stop-color="#D97706" />
+    </linearGradient>
+    <linearGradient id="emeraldGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#34D399" />
+      <stop offset="100%" stop-color="#059669" />
+    </linearGradient>
+    <linearGradient id="trendGrad" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#F59E0B" />
+      <stop offset="55%" stop-color="#FBBF24" />
+      <stop offset="100%" stop-color="#10B981" />
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#bgGrad)" />
+  <rect x="28" y="28" width="456" height="456" rx="92" fill="none" stroke="#F59E0B" stroke-opacity="0.4" stroke-width="8" />
+  <!-- Candlestick 1 (Left - Gold) -->
+  <line x1="140" y1="248" x2="140" y2="408" stroke="#F59E0B" stroke-width="20" stroke-linecap="round" />
+  <rect x="112" y="288" width="56" height="84" rx="14" fill="url(#goldGrad)" />
+  <!-- Candlestick 2 (Center - Gold) -->
+  <line x1="252" y1="196" x2="252" y2="376" stroke="#FBBF24" stroke-width="20" stroke-linecap="round" />
+  <rect x="224" y="236" width="56" height="104" rx="14" fill="url(#goldGrad)" />
+  <!-- Candlestick 3 (Right - Emerald Breakout) -->
+  <line x1="364" y1="124" x2="364" y2="332" stroke="#34D399" stroke-width="22" stroke-linecap="round" />
+  <rect x="336" y="164" width="56" height="128" rx="14" fill="url(#emeraldGrad)" />
+  <!-- Ascending Breakout Trend Arrow -->
+  <path d="M92 264 L196 184 L264 216 L412 100" fill="none" stroke="url(#trendGrad)" stroke-width="32" stroke-linecap="round" stroke-linejoin="round" />
+  <polyline points="348,100 412,100 412,164" fill="none" stroke="#34D399" stroke-width="32" stroke-linecap="round" stroke-linejoin="round" />
+</svg>
